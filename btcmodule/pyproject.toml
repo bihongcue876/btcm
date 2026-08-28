@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "btcm"
+version = "0.9.0"
+description = "BTCM（副思考链模块）后端推理本体"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.7",
+    "openai>=1.30",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28",
+]
+
+# pyproject.toml 位于 btcmodule 包目录内：包名 btcmodule 映射到当前目录，
+# 使 editable 安装后 import btcmodule 可直接可用（cd btcmodule && uv run ...）
+[tool.setuptools]
+packages = ["btcmodule"]
+
+[tool.setuptools.package-dir]
+btcmodule = "."
