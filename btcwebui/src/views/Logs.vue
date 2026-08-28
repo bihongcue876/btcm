@@ -11,7 +11,6 @@ const items = ref<LogItem[]>([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
-const expandedRows = ref<Array<string | number>>([])
 
 function shapeLabel(item: LogItem): string {
   if (item.enable_creative && item.enable_validator) return '完整循环'
@@ -32,6 +31,33 @@ function formatTime(iso: string): string {
   return d.toLocaleString('zh-CN', { hour12: false })
 }
 
+function renderDetail(row: LogItem) {
+  const nodes = []
+  if (row.error) {
+    nodes.push(
+      h('div', { class: 'detail-error' }, [
+        h(
+          NTag,
+          { size: 'small', type: 'error', bordered: false },
+          { default: () => row.error },
+        ),
+      ]),
+    )
+  }
+  if (row.conclusion) {
+    nodes.push(
+      h('div', { class: 'detail-text' }, [
+        h('div', { class: 'detail-label' }, '结论'),
+        row.conclusion,
+      ]),
+    )
+  }
+  if (!row.conclusion && !row.error) {
+    nodes.push(h('div', { class: 'detail-text dim' }, '无结论'))
+  }
+  return h('div', { class: 'detail' }, nodes)
+}
+
 async function load() {
   loading.value = true
   try {
@@ -46,6 +72,7 @@ async function load() {
 }
 
 const columns: DataTableColumns<LogItem> = [
+  { type: 'expand', renderExpand: renderDetail },
   { title: '时间', key: 'timestamp', width: 170, render: (r) => formatTime(r.timestamp) },
   { title: '形态', key: 'shape', width: 90, render: (r) => shapeLabel(r) },
   {
@@ -95,25 +122,9 @@ onMounted(load)
         :columns="columns"
         :data="items"
         :row-key="(r: LogItem) => r.request_id"
-        :expanded-row-keys="expandedRows"
         :pagination="false"
-        @update:expanded-row-keys="(keys: Array<string | number>) => (expandedRows = keys)"
       >
       <template #empty>暂无调用记录</template>
-      <template #row-expand="props">
-        <div class="detail">
-          <div v-if="props.row.error" class="detail-error">
-            <n-tag size="small" type="error" :bordered="false">{{ props.row.error }}</n-tag>
-          </div>
-          <div v-if="props.row.conclusion" class="detail-text">
-            <div class="detail-label">结论</div>
-            {{ props.row.conclusion }}
-          </div>
-          <div v-if="!props.row.conclusion && !props.row.error" class="detail-text dim">
-            无结论
-          </div>
-        </div>
-      </template>
     </n-data-table>
     <div class="pager">
       <n-pagination
@@ -147,22 +158,23 @@ onMounted(load)
   justify-content: flex-end;
   margin-top: 16px;
 }
-.detail {
+/* renderExpand 内容不带 scoped 属性，需穿透 */
+.n-data-table :deep(.detail) {
   padding: 4px 8px;
 }
-.detail-error {
+.n-data-table :deep(.detail-error) {
   margin-bottom: 6px;
 }
-.detail-label {
+.n-data-table :deep(.detail-label) {
   font-size: 12px;
   color: #888;
   margin-bottom: 2px;
 }
-.detail-text {
+.n-data-table :deep(.detail-text) {
   font-size: 13px;
   line-height: 1.6;
 }
-.dim {
+.n-data-table :deep(.dim) {
   color: #999;
 }
 </style>
