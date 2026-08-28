@@ -1,1 +1,22 @@
 docs
+btcmodule/btcm.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+btcmodule/calls.jsonl
+btcmodule/logs/*.jsonl
+btcmodule/static/
+
+btcwebui/build/
+btcwebui/.pnpm-store/
+btcwebui/node_modules/
+*.tsbuildinfo
+
+
+
+.workbuddy
