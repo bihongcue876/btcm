@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "btcm"
-version = "0.9.0"
+version = "0.0.0"
 description = "BTCM（副思考链模块）后端推理本体"
 requires-python = ">=3.14"
 dependencies = [
@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "pydantic>=2.7",
     "openai>=1.30",
+    "httpx>=0.27",
 ]
 
 [dependency-groups]

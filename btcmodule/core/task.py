@@ -1,6 +1,6 @@
 """任务对象定义与请求体模型。
 
-请求体结构对应 share/protocol.md v0.9 中 POST /api/invoke 的约定：
+请求体结构对应 share/protocol.md 中 POST /api/invoke 的约定：
 - 顶层字段含 user_query / candidate / evidence / context_summary /
   enable_creative / enable_validator / config
 - config 仅可覆盖运行时参数（max_iterations、timeout、各 Agent 的温度、
@@ -38,7 +38,7 @@ class InvokeRequest(BaseModel):
     """POST /api/invoke 请求体。
 
     两个启用开关缺省为 None：未提供时由路由层回落到全局配置的默认值
-    （协议 v0.9：请求体未提供则使用全局配置的 enable_creative / enable_validator）。
+    （协议约定：请求体未提供则使用全局配置的 enable_creative / enable_validator）。
     """
 
     request_id: str | None = None

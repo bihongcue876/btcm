@@ -6,20 +6,23 @@
 - 仅验证：纯验证（单次验证 candidate）
 - 双关：长链持续思考（controller 多轮自我迭代 + 最终整合）
 
-终止判定仅三类机械规则：validation_passed / max_iterations / timeout。
+终止判定：validation_passed / controller_stop / max_iterations / timeout。
+全局 timeout 由 asyncio.timeout 强制执行：超时即掐断进行中的 LLM 调用；
+已完成至少一轮则带结果返回（termination_reason=timeout），否则错误 TIMEOUT。
 """
 
 from __future__ import annotations
 
-import time
+import asyncio
 
 from ..agents.controller import ControllerAgent
 from ..agents.creative import CreativeAgent
 from ..agents.validator import ValidatorAgent
 from .config import ConfigManager, resolve_agent_params, resolve_global_params
 from .llm import LLMError, ModelGateway
+from .mcp import MCPManager
 from .result import BTCMError
-from .task import RuntimeConfig, Task
+from .task import Task
 
 # 非 validator 的 Agent 调用失败（LLM 错误 / 解析失败）统一映射为内部错误
 _INTERNAL_MESSAGES = {
@@ -41,8 +44,10 @@ class Engine:
     def __init__(self, cm: ConfigManager, gateway: ModelGateway) -> None:
         self._cm = cm
         self._gateway = gateway
+        # MCPManager 自行注册配置变更回调（update/reset 时缓存失效）
+        self._mcp = MCPManager(cm)
         self._creative = CreativeAgent(cm, gateway)
-        self._validator = ValidatorAgent(cm, gateway)
+        self._validator = ValidatorAgent(cm, gateway, self._mcp)
         self._controller = ControllerAgent(cm, gateway)
 
     @property
@@ -77,71 +82,94 @@ class Engine:
         params = resolve_agent_params(self.config, runtime, "controller")
         log_intermediate = bool(params["log_intermediate"])
 
-        start = time.monotonic()
         current_candidate = task.candidate
         validation_feedback: dict | None = None
+        next_direction: str | None = None
         intermediate_log: list[dict] = []
         iterations = 0
         final_report: dict | None = None
         final_reflection: dict | None = None
         termination_reason = "max_iterations"
 
-        for iteration in range(1, max_iterations + 1):
-            if time.monotonic() - start >= timeout:
-                termination_reason = "timeout"
-                if iterations == 0:
-                    raise BTCMError(
-                        "TIMEOUT", "任务执行超时，且未完成任何一轮"
+        try:
+            async with asyncio.timeout(timeout):
+                for iteration in range(1, max_iterations + 1):
+                    gen = await self._safe_call(
+                        "creative",
+                        lambda: self._creative.generate(
+                            task,
+                            current_candidate,
+                            validation_feedback,
+                            runtime,
+                            next_direction,
+                        ),
                     )
-                break
+                    candidates = gen["candidates"]
+                    report = await self._validator.validate(
+                        task, candidates, runtime
+                    )
+                    reflection = await self._safe_call(
+                        "controller",
+                        lambda: self._controller.reflect(
+                            task, candidates, report, iteration, runtime
+                        ),
+                    )
 
-            candidates = await self._safe_call(
-                "creative",
-                lambda: self._creative.generate(
-                    task, current_candidate, validation_feedback, runtime
-                ),
+                    iterations = iteration
+                    final_report = report
+                    final_reflection = reflection
+
+                    if log_intermediate:
+                        intermediate_log.append(
+                            {
+                                "iteration": iteration,
+                                "creative_output": candidates,
+                                "validator_output": {
+                                    "verdict": report["verdict"],
+                                    "issues": report["issues"],
+                                },
+                                "controller_reflection": {
+                                    "decision": reflection["decision"],
+                                    "next_direction": reflection.get(
+                                        "next_direction", ""
+                                    ),
+                                },
+                            }
+                        )
+
+                    if report["verdict"] == "pass":
+                        termination_reason = "validation_passed"
+                        break
+
+                    # 总控决定提前收敛：结论可用或继续修正边际收益过低。
+                    # fail 时不允许 stop——验证判定存在严重问题时，
+                    # 总控不得把失败提前定稿，必须继续修正轮
+                    if (
+                        reflection["decision"] == "stop"
+                        and report["verdict"] != "fail"
+                    ):
+                        termination_reason = "controller_stop"
+                        break
+
+                    # 未通过：下轮基于最优候选、验证问题与总控方向修正，不再重新发散
+                    current_candidate = (
+                        report.get("best_candidate") or candidates[0]
+                    )
+                    validation_feedback = report
+                    next_direction = reflection.get("next_direction") or None
+        except TimeoutError:
+            if iterations == 0:
+                raise BTCMError(
+                    "TIMEOUT", "任务执行超时，且未完成任何一轮"
+                ) from None
+            termination_reason = "timeout"
+
+        if final_report is None or final_reflection is None:
+            raise BTCMError(
+                "INTERNAL_ERROR",
+                "循环异常终止且无可用轮次结果",
+                status_code=500,
             )
-            report = await self._validator.validate(task, candidates, runtime)
-            reflection = await self._safe_call(
-                "controller",
-                lambda: self._controller.reflect(
-                    task, candidates, report, iteration, runtime
-                ),
-            )
-
-            iterations = iteration
-            final_report = report
-            final_reflection = reflection
-
-            if log_intermediate:
-                intermediate_log.append(
-                    {
-                        "iteration": iteration,
-                        "creative_output": candidates,
-                        "validator_output": {
-                            "verdict": report["verdict"],
-                            "issues": report["issues"],
-                        },
-                        "controller_reflection": {
-                            "decision": reflection.get("decision", "continue")
-                        },
-                    }
-                )
-
-            if report["verdict"] == "pass":
-                termination_reason = "validation_passed"
-                break
-
-            # 本轮结束即超过全局超时：返回已有结果（至少完成一轮）
-            if time.monotonic() - start >= timeout:
-                termination_reason = "timeout"
-                break
-
-            # 未通过：下轮基于最优候选与验证问题修正，不再重新发散
-            current_candidate = report.get("best_candidate") or candidates[0]
-            validation_feedback = report
-
-        assert final_report is not None and final_reflection is not None
         data: dict = {
             "verdict": final_report["verdict"],
             "conclusion": final_reflection.get("conclusion", ""),
@@ -159,13 +187,20 @@ class Engine:
 
     async def _run_pure_creative(self, task: Task) -> dict:
         runtime = task.runtime_config
-        candidates = await self._safe_call(
-            "creative",
-            lambda: self._creative.generate(task, task.candidate, None, runtime),
-        )
+        _, timeout = resolve_global_params(self.config, runtime)
+        try:
+            async with asyncio.timeout(timeout):
+                gen = await self._safe_call(
+                    "creative",
+                    lambda: self._creative.generate(
+                        task, task.candidate, None, runtime
+                    ),
+                )
+        except TimeoutError:
+            raise BTCMError("TIMEOUT", "任务执行超时，且未完成") from None
         return {
-            "candidates": candidates,
-            "conclusion": candidates[0] if candidates else "",
+            "candidates": gen["candidates"],
+            "conclusion": gen["conclusion"],
             "iterations_used": 1,
             "termination_reason": "single_pass",
         }
@@ -179,9 +214,14 @@ class Engine:
                 "INVALID_REQUEST",
                 "纯验证形态（enable_creative=false）下 candidate 必填",
             )
-        report = await self._validator.validate(
-            task, [task.candidate], runtime
-        )
+        _, timeout = resolve_global_params(self.config, runtime)
+        try:
+            async with asyncio.timeout(timeout):
+                report = await self._validator.validate(
+                    task, [task.candidate], runtime
+                )
+        except TimeoutError:
+            raise BTCMError("TIMEOUT", "任务执行超时，且未完成") from None
         return {
             "verdict": report["verdict"],
             "conclusion": _validation_conclusion(report),
@@ -198,48 +238,46 @@ class Engine:
         runtime = task.runtime_config
         max_iterations, timeout = resolve_global_params(self.config, runtime)
 
-        start = time.monotonic()
         thoughts: list[str] = []
         intermediate_log: list[dict] = []
         termination_reason = "max_iterations"
+        conclusion = ""
 
-        for iteration in range(1, max_iterations + 1):
-            if time.monotonic() - start >= timeout:
-                termination_reason = "timeout"
-                if not thoughts:
-                    raise BTCMError(
-                        "TIMEOUT", "任务执行超时，且未完成任何一轮思考"
+        try:
+            async with asyncio.timeout(timeout):
+                for iteration in range(1, max_iterations + 1):
+                    out = await self._safe_call(
+                        "controller",
+                        lambda: self._controller.think(
+                            task, thoughts, iteration, runtime
+                        ),
                     )
-                break
+                    thoughts.append(out["thought"])
+                    intermediate_log.append(
+                        {"iteration": iteration, "thought": out["thought"]}
+                    )
 
-            out = await self._safe_call(
-                "controller",
-                lambda: self._controller.think(
-                    task, thoughts, iteration, runtime
-                ),
-            )
-            thoughts.append(out["thought"])
-            intermediate_log.append(
-                {"iteration": iteration, "thought": out["thought"]}
-            )
+                # timeout 终止时不进入 finalize（预算已耗尽，不再发起额外调用）；
+                # 正常终止时 finalize 失败也回退最后一轮，避免把
+                # "已完成思考"降级成 INTERNAL_ERROR
+                if thoughts:
+                    try:
+                        conclusion = await self._safe_call(
+                            "controller",
+                            lambda: self._controller.finalize(
+                                task, thoughts, runtime
+                            ),
+                        )
+                    except BTCMError:
+                        conclusion = thoughts[-1]
+        except TimeoutError:
+            termination_reason = "timeout"
+            if not thoughts:
+                raise BTCMError(
+                    "TIMEOUT", "任务执行超时，且未完成任何一轮思考"
+                ) from None
+            conclusion = thoughts[-1]
 
-            if time.monotonic() - start >= timeout:
-                termination_reason = "timeout"
-                break
-
-        # timeout 终止时跳过 finalize（预算已耗尽，不再发起第 N+1 次调用），
-        # 以最后一轮思考作结论；正常终止时 finalize 失败也回退最后一轮，
-        # 避免把"已完成思考"降级成 INTERNAL_ERROR
-        if termination_reason == "timeout":
-            conclusion = thoughts[-1] if thoughts else ""
-        else:
-            try:
-                conclusion = await self._safe_call(
-                    "controller",
-                    lambda: self._controller.finalize(task, thoughts, runtime),
-                )
-            except BTCMError:
-                conclusion = thoughts[-1] if thoughts else ""
         return {
             "conclusion": conclusion,
             "iterations_used": len(thoughts),
