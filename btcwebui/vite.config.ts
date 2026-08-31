@@ -1,10 +1,16 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import Components from 'unplugin-vue-components/vite'
+import { NaiveUiResolver } from 'unplugin-vue-components/resolvers'
 import { fileURLToPath, URL } from 'node:url'
 
 // dev 时将 /api 代理到后端本体；生产由 FastAPI 同源托管，无需代理
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    // naive-ui 组件按需自动引入：模板 <n-xxx> 无需手动 import，tree-shaking 生效
+    Components({ resolvers: [NaiveUiResolver()] }),
+  ],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
@@ -26,10 +32,11 @@ export default defineConfig({
     emptyOutDir: false,
     rollupOptions: {
       output: {
-        // 框架与 UI 库独立 chunk：长缓存 + 主包瘦身
+        // 框架独立 chunk：长缓存 + 主包瘦身。
+        // 注意不要把 naive-ui 包入口写进 manualChunks——那会把整包
+        // 拉进单一 chunk；按需引入的组件由 rollup 自动聚成共享 chunk
         manualChunks: {
           vue: ['vue', 'vue-router'],
-          naive: ['naive-ui'],
         },
       },
     },

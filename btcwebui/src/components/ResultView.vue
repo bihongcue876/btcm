@@ -41,6 +41,7 @@ function verdictType(v: string) {
 
 function reasonType(r: string) {
   if (r === 'validation_passed') return 'success'
+  if (r === 'controller_stop') return 'success' // 总控主动收敛：正常终止
   if (r === 'timeout') return 'warning'
   if (r === 'single_pass') return 'default'
   return 'info'

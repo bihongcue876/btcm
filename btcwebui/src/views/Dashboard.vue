@@ -8,7 +8,7 @@ import ResultView from '@/components/ResultView.vue'
 import ShapeIndicator from '@/components/ShapeIndicator.vue'
 
 const message = useMessage()
-// 开关默认值跟随全局配置（协议 v0.9：请求未提供时回落全局默认）
+// 开关默认值跟随全局配置（协议约定：请求未提供时回落全局默认）
 const creative = ref(true)
 const validator = ref(true)
 const result = ref<InvokeData | null>(null)

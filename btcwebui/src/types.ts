@@ -1,10 +1,19 @@
-// 类型定义，对齐 share/protocol.md v0.9
+// 类型定义，对齐 share/protocol.md（alpha 阶段随实现迭代）
 
 export interface ProviderConfig {
   base_url: string
   api_key?: string | null
   models: string[]
   timeout?: number
+}
+
+export interface MCPServerConfig {
+  preset?: string | null
+  url?: string | null
+  api_key?: string | null
+  enabled?: boolean
+  timeout?: number
+  allowed_tools?: string[]
 }
 
 export interface AgentConfig {
@@ -16,6 +25,7 @@ export interface AgentConfig {
   timeout?: number | null
   enable_web_search?: boolean
   web_sources?: string[]
+  mcp_servers?: string[]
   log_intermediate?: boolean
 }
 
@@ -24,7 +34,9 @@ export interface GlobalConfig {
   timeout: number
   enable_creative: boolean
   enable_validator: boolean
+  admin_token?: string | null
   providers: Record<string, ProviderConfig>
+  mcp_servers: Record<string, MCPServerConfig>
   agents: Record<string, AgentConfig>
 }
 
@@ -35,6 +47,7 @@ export interface RuntimeAgentOverride {
   timeout?: number | null
   enable_web_search?: boolean | null
   web_sources?: string[] | null
+  mcp_servers?: string[] | null
   log_intermediate?: boolean | null
 }
 
@@ -79,7 +92,7 @@ export interface HybridIntermediateEntry {
   iteration: number
   creative_output?: string[]
   validator_output?: ValidatorOutput
-  controller_reflection?: { decision?: string }
+  controller_reflection?: { decision?: string; next_direction?: string }
 }
 
 export interface LongChainIntermediateEntry {
