@@ -200,5 +200,65 @@ class ResolveParamsTest(unittest.TestCase):
             )
 
 
+class GatewayFriendlyErrorTest(unittest.TestCase):
+    def test_missing_api_key_friendly_error(self):
+        """非本地提供商缺 api_key：直接给出可操作的错误，不发网络请求。"""
+        import asyncio
+
+        from btcmodule.core.llm import LLMError, ModelGateway
+
+        with tempfile.TemporaryDirectory() as d:
+            cm = ConfigManager(path=Path(d) / "btcm.json")
+            gw = ModelGateway(cm)
+            with self.assertRaises(LLMError) as ctx:
+                asyncio.run(
+                    gw.chat(
+                        "creative",
+                        [{"role": "user", "content": "hi"}],
+                        None,
+                    )
+                )
+            self.assertIn("未配置 api_key", ctx.exception.message)
+
+
+class UsageRecordTest(unittest.TestCase):
+    def test_record_usage_accumulates(self):
+        """usage 上下文累计：token 用量与调用次数。"""
+        from btcmodule.core import llm as llm_mod
+
+        init = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "llm_calls": 0,
+            "tool_calls": 0,
+        }
+        token = llm_mod.usage_var.set(init)
+        try:
+
+            class U:
+                prompt_tokens = 10
+                completion_tokens = 5
+
+            llm_mod._record_usage(U(), llm_calls=1)
+            llm_mod._record_usage(None, tool_calls=2)
+            self.assertEqual(
+                init,
+                {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "llm_calls": 1,
+                    "tool_calls": 2,
+                },
+            )
+        finally:
+            llm_mod.usage_var.reset(token)
+
+    def test_record_usage_noop_without_context(self):
+        """未进入 invoke 上下文（如单测直连网关）时记账为空操作。"""
+        from btcmodule.core import llm as llm_mod
+
+        llm_mod._record_usage(None, llm_calls=1, tool_calls=1)  # 不应抛出
+
+
 if __name__ == "__main__":
     unittest.main()

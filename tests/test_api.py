@@ -85,6 +85,22 @@ class ConfigApiTest(unittest.TestCase):
             patcher.stop()
             tmp.cleanup()
 
+    def test_reset_config(self):
+        """POST /api/config/reset 恢复默认，未提供的开关回落到默认形态。"""
+        client, fake, patcher, tmp = make_client()
+        try:
+            client.put("/api/config", json={"max_iterations": 5, "timeout": 30})
+            r = client.post("/api/config/reset")
+            self.assertEqual(r.status_code, 200)
+            data = r.json()["data"]
+            self.assertEqual(data["max_iterations"], 2)
+            self.assertEqual(data["timeout"], 300)
+            self.assertTrue(data["enable_creative"])
+            self.assertTrue(data["enable_validator"])
+        finally:
+            patcher.stop()
+            tmp.cleanup()
+
 
 class InvokeApiTest(unittest.TestCase):
     def test_pure_creative(self):
@@ -182,7 +198,7 @@ class InvokeApiTest(unittest.TestCase):
             tmp.cleanup()
 
     def test_global_switch_fallback(self):
-        """请求体未提供开关时，使用全局配置默认值（协议 v0.9）。"""
+        """请求体未提供开关时，使用全局配置默认值（协议约定）。"""
         client, fake, patcher, tmp = make_client()
         try:
             client.put("/api/config", json={"enable_validator": False})
@@ -227,6 +243,90 @@ class InvokeApiTest(unittest.TestCase):
             )
             self.assertEqual(r.status_code, 500)
             self.assertEqual(r.json()["error"]["code"], "INTERNAL_ERROR")
+        finally:
+            patcher.stop()
+            tmp.cleanup()
+
+
+class StaticPanelApiTest(unittest.TestCase):
+    """静态面板单端口托管：SPA 深链接回退与统一 404 envelope。"""
+
+    def make_static_client(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        static = root / "static"
+        static.mkdir()
+        (static / "index.html").write_text(
+            "<!DOCTYPE html><html><head><title>BTCM</title></head>"
+            "<body>panel</body></html>",
+            encoding="utf-8",
+        )
+        app = create_app(
+            config_path=root / "btcm.json",
+            log_path=root / "calls.jsonl",
+            static_dir=static,
+        )
+        return TestClient(app), tmp
+
+    def test_index_served_at_root(self):
+        client, tmp = self.make_static_client()
+        try:
+            r = client.get("/")
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("panel", r.text)
+        finally:
+            tmp.cleanup()
+
+    def test_spa_deep_link_fallback(self):
+        """history 路由深链接（无同名文件且无扩展名）回退 index.html。"""
+        client, tmp = self.make_static_client()
+        try:
+            r = client.get("/config")
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("panel", r.text)
+            r = client.get("/logs")
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("panel", r.text)
+        finally:
+            tmp.cleanup()
+
+    def test_api_404_returns_unified_envelope(self):
+        """未匹配的 /api 路径返回统一外层结构，不做 SPA 回退。"""
+        client, tmp = self.make_static_client()
+        try:
+            r = client.get("/api/no-such-endpoint")
+            self.assertEqual(r.status_code, 404)
+            body = r.json()
+            self.assertFalse(body["success"])
+            self.assertIsNone(body["data"])
+            self.assertEqual(body["error"]["code"], "NOT_FOUND")
+            self.assertTrue(body["request_id"])
+        finally:
+            tmp.cleanup()
+
+    def test_static_asset_404_not_spa_fallback(self):
+        """带扩展名的资源缺失不回退 index.html，仍返回统一 envelope。"""
+        client, tmp = self.make_static_client()
+        try:
+            r = client.get("/assets/missing.js")
+            self.assertEqual(r.status_code, 404)
+            body = r.json()
+            self.assertFalse(body["success"])
+            self.assertEqual(body["error"]["code"], "NOT_FOUND")
+        finally:
+            tmp.cleanup()
+
+
+class HealthApiTest(unittest.TestCase):
+    def test_health(self):
+        client, fake, patcher, tmp = make_client()
+        try:
+            r = client.get("/api/health")
+            self.assertEqual(r.status_code, 200)
+            data = r.json()["data"]
+            self.assertEqual(data["status"], "ok")
+            self.assertEqual(data["version"], "0.0.0")
+            self.assertIsInstance(data["uptime_s"], int)
         finally:
             patcher.stop()
             tmp.cleanup()

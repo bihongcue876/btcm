@@ -1,9 +1,10 @@
 # BTCM（Beside-Thinking Chain Module，副思考链模块）
 
-可嵌入大型集成 Agent 的辅助思考器官：接收思考任务，内部由创意生成、验证、总控三个 Agent 经“生成-验证-反思”循环处理后返回结构化结果。服务无状态，自带 Web 控制面板，单端口运行。
+可嵌入大型集成 Agent 的辅助思考器官：接收思考任务，内部由创意生成、验证、总控三个 Agent 经“生成-验证-反思”循环处理后返回结构化结果。总控承担元认知式的全局思维管理（可提前收敛终止），验证 Agent 可按需接入 MCP 联网工具。服务无状态，自带 Web 控制面板，单端口运行。
 
 - 总体设计：[share/spec.md](share/spec.md)
-- 接口契约：[share/protocol.md](share/protocol.md)（v0.9，唯一权威）
+- Agent 设计：[docs/Agents.md](docs/Agents.md)
+- 接口契约：[share/protocol.md](share/protocol.md)（唯一权威；alpha 阶段随实现迭代）
 
 ---
 
@@ -30,7 +31,27 @@ curl -X PUT http://localhost:8000/api/config \
   -d '{"providers":{"deepseek":{"api_key":"sk-xxx"}}}'
 ```
 
-`GET /api/config` 不会回显任何 api_key。
+`GET /api/config` 不会回显任何 api_key、MCP 密钥与管理令牌。
+
+可选：设置管理令牌（设置后写配置/重置/日志接口需 `X-Admin-Token` 头）：
+
+```bash
+curl -X PUT http://localhost:8000/api/config \
+  -H "Content-Type: application/json" \
+  -d '{"admin_token":"your-token"}'
+```
+
+可选：为验证 Agent 接入 MCP 联网工具（可用才调用，不可用自动退回纯逻辑验证）：
+
+```bash
+# 注册一个内置预设（tavily / exa / deepwiki / fetch），并允许验证 Agent 使用
+curl -X PUT http://localhost:8000/api/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mcp_servers": {"tavily": {"preset": "tavily", "api_key": "tvly-xxx"}},
+    "agents": {"validator": {"enable_web_search": true, "mcp_servers": ["tavily"]}}
+  }'
+```
 
 ### 3. 发起调用
 
@@ -58,7 +79,7 @@ curl -X POST http://localhost:8000/api/invoke \
   -d '{"user_query":"深入思考一个开放性问题","enable_creative":false,"enable_validator":false}'
 ```
 
-响应为统一外层结构 `{success, data, error, request_id}`，`data` 按运行形态分化（完整循环/纯验证含 `verdict`，纯创意含 `candidates`，长链含 `conclusion` 与逐轮 `intermediate_log`）。
+响应为统一外层结构 `{success, data, error, request_id}`，`data` 按运行形态分化（完整循环/纯验证含 `verdict`，纯创意含 `candidates`，长链含 `conclusion` 与逐轮 `intermediate_log`），并含可选 `usage` token 计量。`/api/invoke` 并发上限 4（满载返回 429；设置 `admin_token` 后写配置/重置/日志接口需 `X-Admin-Token` 头）。
 
 ### 4. 运行测试
 
@@ -86,7 +107,7 @@ pnpm build      # 产物自动复制到 btcmodule/static/
 # 重启后端后访问 http://localhost:8000 即可同时获得 API 与控制面板
 ```
 
-面板提供三页：**运行**（发起调用并观察中间过程）、**配置**（可视化编辑运行参数与模型路由）、**日志**（历史调用记录分页查看）。
+面板提供三页：**运行**（发起调用并观察中间过程）、**配置**（可视化编辑运行参数、模型路由、MCP 服务器注册表与管理令牌，密钥类输入不回显）、**日志**（历史调用记录分页查看，含 token 计量）。
 
 ---
 

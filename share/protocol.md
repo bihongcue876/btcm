@@ -1,10 +1,12 @@
 # BTCM 接口协议（Protocol Specification）
 
-**版本**：0.9  
+**版本**：0.0.0（alpha）  
 **基础路径**：`/api`  
 **协议**：HTTP/HTTPS  
 **数据格式**：JSON（UTF-8）  
 **无状态**：所有请求独立，服务器不保留客户端会话状态，调用历史仅作为日志存储。
+
+> 项目整体处于 alpha 搭建验证阶段，版本号冻结为 0.0.0，直至作者发布升级指令；下方变更记录按迭代顺序保留。
 
 ---
 
@@ -115,8 +117,11 @@
 | `agents.<agent>.temperature` | float | 各 Agent 采样温度，范围 0~2；`<agent>` 可为 creative / validator / controller，默认值分别为 0.8 / 0.3 / 0.3 |
 | `agents.<agent>.max_tokens` | integer | 各 Agent 单次请求最大输出 token 数，范围 256~32768；默认值 creative / validator 为 2048，controller 为 1024 |
 | `agents.<agent>.timeout` | integer | 各 Agent 单次 LLM 请求超时秒数，范围 1~3600；默认未设置，使用所属提供商的 `timeout` |
-| `agents.validator.enable_web_search` | boolean | 是否允许验证 Agent 联网搜索，默认 false |
-| `agents.validator.web_sources` | array of strings | 联网搜索白名单域名，默认 `["wikipedia.org", "gov.cn", "edu.cn"]` |
+| `agents.validator.enable_web_search` | boolean | 是否允许验证 Agent 使用联网工具（MCP），默认 false |
+| `agents.validator.web_sources` | array of strings | 联网验证期望的权威域名（提示词参考），默认 `["wikipedia.org", "gov.cn", "edu.cn"]` |
+| `agents.validator.mcp_servers` | array of strings | 验证 Agent 可用的 MCP 服务器名列表，引用 `mcp_servers` 注册表条目 |
+
+**MCP 联网工具**：`enable_web_search=true` 且 `mcp_servers` 非空时，验证 Agent 经 OpenAI function calling 调用 MCP 工具获取外部事实。工具"可用才调用"：连接失败、握手失败或超时的服务器被跳过，当次退回纯逻辑验证，不报错。内置市面 MCP 预设（`tavily` / `exa` / `deepwiki` / `fetch`），经全局配置的 `mcp_servers` 注册表启用（详见 2.2/2.3）。
 
 #### 2.1.2 响应体
 
@@ -179,11 +184,13 @@
     "候选方案2（含简要理由）",
     "候选方案3（含简要理由）"
   ],
-  "conclusion": "综合各候选的推荐说明，或最优候选的展开",
+  "conclusion": "创意 Agent 综合全部候选给出的推荐说明（概括各候选取舍，不偏向单一候选）",
   "iterations_used": 1,
   "termination_reason": "single_pass"
 }
 ```
+
+`conclusion` 由创意 Agent 在同一次调用中给出，候选数量不限（`num_candidates` 可调）；若模型未输出该字段，回退为全部候选的串联。
 
 **长链持续思考（enable_creative=false、enable_validator=false）** 的 `data` 字段：
 
@@ -222,15 +229,19 @@
 | `iterations_used` | integer | 全部 | 实际执行轮数（纯形态恒为 1） |
 | `termination_reason` | string | 全部 | 终止原因，见下方说明 |
 | `intermediate_log` | array of objects | 完整循环、长链持续思考 | 每轮循环的中间摘要（完整循环若配置 `log_intermediate: true`，长链持续思考恒记录），否则可能省略或为 null |
+| `usage` | object | 全部（可选） | 本次调用 LLM 计量：`prompt_tokens` / `completion_tokens` / `llm_calls` / `tool_calls`；发生至少一次 LLM 调用时返回 |
 
 **`termination_reason` 取值**：
 
 | 取值 | 说明 |
 |------|------|
 | `validation_passed` | 完整循环中验证 Agent 判定 `pass`，提前结束循环 |
+| `controller_stop` | 完整循环中总控 Agent 反思判定 `decision=stop`（结论可用或继续修正边际收益过低），提前结束循环；判定优先级低于 `validation_passed` |
 | `max_iterations` | 达到最大循环轮数 |
 | `timeout` | 达到超时限制 |
 | `single_pass` | 纯形态（纯创意 / 纯验证）单次执行完成 |
+
+**总控反思的实效**：完整循环中，总控 Agent 的 `decision` 参与终止判定（见上表；`verdict=fail` 时 `decision=stop` 无效，循环强制继续，验证判定存在严重问题不得提前定稿）；未终止时其 `next_direction` 作为下轮创意 Agent 的修正方向输入（不重新发散）；`intermediate_log` 各轮的 `controller_reflection` 含 `decision` 与 `next_direction`。响应 `verdict` 恒为验证 Agent 的原判，不因 `controller_stop` 改写。
 
 #### 2.1.3 错误响应
 
@@ -241,6 +252,8 @@
 | `INVALID_REQUEST` | 请求体缺少必要字段或格式错误 |
 | `CONFIG_VALIDATION_ERROR` | `config` 中参数超出允许范围或类型错误 |
 | `TIMEOUT` | 任务执行超时 |
+| `RATE_LIMITED` | 并发调用达到上限（默认 4），稍后重试（HTTP 429） |
+| `UNAUTHORIZED` | 受保护端点缺少或错误的管理令牌（HTTP 401） |
 | `INTERNAL_ERROR` | 服务器内部异常 |
 
 ---
@@ -305,8 +318,9 @@
 
 - `enable_creative` / `enable_validator` 为 Agent 启用开关的全局默认值，请求体顶层字段可对当次调用覆盖；总控 Agent（controller）恒启用，无开关。
 - `providers` 为 OpenAI 兼容提供商注册表，各 Agent 通过 `provider` + `model` 指向其一，可分别使用不同提供商与模型。
+- `mcp_servers` 为 MCP 服务器注册表（验证 Agent 联网工具），条目字段：`preset`（内置预设名，可选）或 `url`（直接给出 Streamable HTTP 端点）、`api_key`（预设需要密钥时填写）、`enabled`（默认 true）、`timeout`（单请求超时秒数，默认 60）、`allowed_tools`（工具白名单，留空 = 全部）。Agent 经 `agents.validator.mcp_servers` 引用条目名。
 - 提供商字段：`base_url`（必填）、`models`（该提供商可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 120）。本地推理服务（Ollama、llama.cpp、LM Studio 等）同样经 OpenAI 兼容接口接入，推理较慢，建议按需放宽 `timeout`（如 600）；本地服务无需鉴权，`api_key` 可省略或填任意占位值。
-- `providers.<name>.api_key` 仅在 `PUT /api/config` 时写入，`GET /api/config` 不回显该字段。
+- `providers.<name>.api_key`、`mcp_servers.<name>.api_key` 与 `admin_token` 仅在 `PUT /api/config` 时写入，`GET /api/config` 不回显这些字段。
 
 ---
 
@@ -336,7 +350,9 @@
 }
 ```
 
-只需提供需要更新的字段，未提供的字段保持不变。提供商与 Agent 路由可整体或局部更新；`providers.<name>` 的部分更新按字段合并。
+只需提供需要更新的字段，未提供的字段保持不变。提供商与 Agent 路由可整体或局部更新；`providers.<name>` 与 `mcp_servers.<name>` 的部分更新按字段合并。
+
+**鉴权**：配置 `admin_token` 后，`PUT /api/config`、`POST /api/config/reset` 与 `GET /api/logs` 要求请求头 `X-Admin-Token` 携带该令牌，缺失或错误返回 401 `UNAUTHORIZED`；`POST /api/invoke` 与 `GET /api/config` 恒为开放端点（响应不含任何密钥）。`admin_token` 本身仅可写入、不回显，丢失后只能直接编辑 `btcm.json` 或经 `POST /api/config/reset` 重置（重置同样需要令牌）。
 
 #### 2.3.2 响应体
 
@@ -346,7 +362,27 @@
 
 ---
 
-### 2.4 获取调用历史
+### 2.4 重置配置为默认
+
+**端点**：`POST /api/config/reset`
+
+**功能**：将配置重置为内置默认值（DeepSeek + 本地 Ollama 示例路由、双开形态、全部 Agent 定义），立即生效并持久化。
+
+#### 2.4.1 请求体
+
+无。
+
+#### 2.4.2 响应体
+
+返回重置后的完整配置，结构同 `GET /api/config`。
+
+**错误**：若重置写入失败，返回 `INTERNAL_ERROR`。
+
+> 供控制面板"重置为默认"按钮调用；API 调用方也可直接使用深度合并部分更新达到相同效果。
+
+---
+
+### 2.5 获取调用历史
 
 **端点**：`GET /api/logs?limit=20&offset=0`
 
@@ -374,14 +410,42 @@
         "enable_validator": true,
         "verdict": "conditional_pass",
         "iterations_used": 2,
-        "user_query": "下周去东京，预算 5000，能去哪些地方？"
+        "termination_reason": "max_iterations",
+        "user_query": "下周去东京，预算 5000，能去哪些地方？",
+        "duration_ms": 52300,
+        "conclusion": "……",
+        "error": null,
+        "usage": {"prompt_tokens": 12000, "completion_tokens": 3400, "llm_calls": 6, "tool_calls": 2}
       }
     ]
   }
 }
 ```
 
-`verdict` 在纯创意与长链持续思考形态的记录中为 null。
+`verdict` 在纯创意与长链持续思考形态的记录中为 null；`conclusion` 仅成功记录携带；`error` 为该次调用的错误码（成功为 null）；`usage` 与响应 `data.usage` 同构，未发生 LLM 调用（如被拒请求）时为 null。
+
+---
+
+### 2.6 健康检查
+
+**端点**：`GET /api/health`
+
+**功能**：探活端点，供宿主 Agent 与运维检查；恒开放、无需鉴权、不含敏感信息。
+
+**响应体**：
+
+```json
+{
+  "success": true,
+  "data": {
+    "status": "ok",
+    "version": "0.0.0",
+    "uptime_s": 3600
+  },
+  "error": null,
+  "request_id": "uuid"
+}
+```
 
 ---
 
@@ -399,7 +463,7 @@
 - 服务端启动时加载配置文件 `btcmodule/btcm.json`；该文件不受版本管理，首次启动若不存在，则由内置默认配置生成。
 - `PUT /api/config` 更新会写入该配置文件（原子写入），并立即生效。
 - 若请求中未提供 `config`，则完全使用全局配置。
-- `providers.<name>.api_key` 仅通过 `PUT /api/config` 写入，任何读取接口不回显。
+- `providers.<name>.api_key`、`mcp_servers.<name>.api_key` 与 `admin_token` 仅通过 `PUT /api/config` 写入，任何读取接口不回显。
 
 ---
 
@@ -409,7 +473,7 @@
   - **全局 `timeout`**（默认 300 秒）：单次调用（含全部循环轮次）的总时长限制。
   - **Agent 级 `agents.<name>.timeout`**（可选）：该 Agent 单次 LLM 请求超时，设置后覆盖提供商值。
   - **提供商级 `providers.<name>.timeout`**（默认 120 秒）：该提供商下单次 LLM 请求超时，Agent 级未设置时生效。
-- 达到全局超时后：若已至少完成一轮迭代（有可用的结果——完整循环中为验证判定，长链持续思考中为本轮思考要点），返回成功响应并置 `termination_reason` 为 `timeout`；若一轮都未完成（无可返回的结果），返回错误 `TIMEOUT`。
+- 全局 `timeout` 由服务端强制执行（对整次调用计时，超时即掐断进行中的 LLM 请求）：若已至少完成一轮迭代（有可用的结果——完整循环中为验证判定，长链持续思考中为本轮思考要点），返回成功响应并置 `termination_reason` 为 `timeout`；若一轮都未完成（无可返回的结果），返回错误 `TIMEOUT`。
 - 单次 LLM 请求超时视为该请求失败，触发一次重试，仍失败则该轮降级为 `fail` 判定（与输出解析失败同路径处理）。
 - 使用本地模型时应保证 全局 timeout ≥ 单请求 timeout × 预计请求数，否则调用会在模型完成前被整体掐断。
 
@@ -424,6 +488,8 @@
 
 ## 6. 变更记录
 
+- alpha-2（2026-08-30，内部迭代）：`/api/invoke` 加并发上限（默认 4，满载立即 429 `RATE_LIMITED`，不排队）；响应 `data` 新增可选 `usage` 计量（prompt/completion tokens、llm_calls、tool_calls）并同步进调用日志；完整循环中 `verdict=fail` 时总控 `decision=stop` 无效（不得定稿失败）；LLM 失败重试加 0.5s 退避；非本地提供商缺 api_key 时直接返回可操作错误；MCP 工具输出加注入防护包裹（资料非指令）；MCP 连接缓存随配置变更失效；新增 `GET /api/health` 探活端点；配置更新与日志写入加锁串行化；调用日志加上限裁剪与异步写；新增结构化运行日志（btcmodule.* logger）。
+- alpha-1（2026-08-28，内部迭代，原文记 1.0）：总控 Agent 实权化——反思 `decision` 参与终止判定（新增 `controller_stop`，优先级低于 `validation_passed`），`next_direction` 回灌下轮创意输入并在 `intermediate_log` 中输出；纯创意 `conclusion` 改为创意 Agent 综合全部候选给出（缺失回退候选串联），不再取首个候选；验证 Agent 接入 MCP 联网工具（`mcp_servers` 注册表 + 内置预设 tavily/exa/deepwiki/fetch，可用才调用，不可用降级纯逻辑验证），`enable_web_search` 语义变为工具总开关；新增 `admin_token`（仅写不回显，PUT/reset/logs 端点要求 `X-Admin-Token`，新增 401 `UNAUTHORIZED`）；全局 `timeout` 改为强制执行（掐断进行中调用）；调用日志加上限裁剪与异步写。
 - 0.9（2026-08-23）：移除 `mode` 字段与全局 `modes` 开关，改为请求体顶层 `enable_creative` / `enable_validator` 两个布尔开关（默认 true），由组合定义运行形态：均开=完整循环（原 hybrid）、仅创意=纯创意、仅验证=纯验证、均关=长链持续思考（新增，仅 controller 多轮自我迭代）；总控 Agent 恒启用，删除 `MODE_DISABLED` / `INVALID_MODE` 错误码；`termination_reason` 的 `single_pass` 适用范围改为纯创意/纯验证；`GET/PUT /api/config` 增加开关字段。
 - 0.8（2026-08-23）：新增 Agent 级公共参数 temperature（creative 默认 0.8，validator/controller 默认 0.3）、max_tokens（creative/validator 默认 2048，controller 默认 1024）、timeout（可选，覆盖所属提供商单请求超时）；确立配置四层优先级（请求内 config > Agent 级 > 提供商级 > 内置默认）；请求内 config 可覆盖项扩展至温度、token 上限、单请求超时；明确单次 LLM 请求超时按"一次重试后降级 fail"处理。
 - 0.7（2026-08-23）：全局 `timeout` 范围由 1~300 放宽为 1~3600、默认 60 改为 300（本地模型多轮循环所需）；`max_iterations` 默认 3 改为 2；`pure_validation` 模式下 `candidate` 必填，缺失返回 INVALID_REQUEST；明确超时的成功/错误路径（完成至少一轮则成功返回 termination_reason=timeout，否则错误 TIMEOUT）。

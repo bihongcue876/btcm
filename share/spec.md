@@ -28,7 +28,9 @@ project-root/
 │   │   ├── task.py            # 任务对象定义
 │   │   ├── result.py          # 结果对象定义
 │   │   ├── config.py          # 配置加载与校验（Pydantic）
-│   │   ├── llm.py             # 模型网关：提供商注册表 + 按 Agent 路由
+│   │   ├── llm.py             # 模型网关：提供商注册表 + 按 Agent 路由 + 工具调用循环
+│   │   ├── mcp.py             # MCP 最小客户端（Streamable HTTP）与工具管理
+│   │   ├── logger.py          # 调用日志（JSONL，内存镜像 + 上限裁剪）
 │   │   └── loop.py            # 主循环控制器（总控 Agent）
 │   ├── agents/
 │   │   ├── __init__.py
@@ -60,12 +62,13 @@ project-root/
 ## 3. 技术栈
 
 ### 3.1 后端（btcmodule）
-- **Python** 3.11+
+- **Python** 3.14（uv 管理，面向 Python 3.14 后端环境的宿主 Agent）
 - **FastAPI**：Web 框架
 - **Uvicorn**：ASGI 服务器
 - **Pydantic**：数据校验与配置管理
 - **openai**：OpenAI 兼容协议客户端，统一对接各模型服务（DeepSeek、Ollama、OpenRouter 等）
-- **asyncio**：异步并发控制
+- **httpx**：MCP Streamable HTTP 客户端与异步 HTTP
+- **asyncio**：异步并发控制（`asyncio.timeout` 强制全局超时）
 
 ### 3.2 前端（btcwebui）
 - **Vue 3** + **TypeScript**
@@ -73,6 +76,7 @@ project-root/
 - **Naive UI**：UI 组件库（轻量、适合管理面板）
 - **Axios**：HTTP 客户端
 - **Vue Router**：路由管理
+- 包管理使用 pnpm；构建产物经 postbuild 脚本复制到 `btcmodule/static/`
 
 ## 4. 后端核心设计
 
@@ -104,19 +108,17 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 - **输出**：验证报告，包含判定（pass/conditional_pass/fail）、问题列表、改进建议。
 - **特点**：支持两种子验证：
   - **逻辑验证**：检查一致性、完备性、推理漏洞。
-  - **事实验证**：可选联网搜索（白名单控制），核对事实依据。
+  - **事实验证**：经 MCP 联网工具核对事实依据。`enable_web_search` 为工具总开关，`mcp_servers` 指向注册表中启用的服务器（内置市面预设 tavily/exa/deepwiki/fetch）；工具经 OpenAI function calling 调用，遵循"可用才调用"——服务器不可用时静默降级为纯逻辑验证。`web_sources` 作为期望权威域名写入提示词。
 
 #### 4.2.3 总控 Agent（Controller Agent）
-- **职责**：兼任调度器、反思器和终止判断器，是 BTCM 的核心大脑；当创意与验证 Agent 均未启用时，独立承担长链持续思考。
-- **形态**：由 LLM 管理，但反思过程控制在要点级——提示词与输出只覆盖当轮整合结论、剩余问题、下轮动作（短句要点，不展开长篇推理），单轮反思时长可控。
-- **输入**：初始任务、配置参数；长链持续思考形态下为任务与上一轮思考要点。
-- **输出**：最终结构化结果，以及每轮循环的中间状态（供日志/前端观察）。
-- **功能**：
-  - 根据 `enable_creative` / `enable_validator` 开关决定调用哪些 Agent。
-  - 管理循环：每轮执行后，基于验证判定判断是否继续；轮次达到 `max_iterations` 即准备返回。
-  - 长链持续思考形态下，作为唯一执行者逐轮深化思考：基于任务与上一轮要点输出新一轮思考要点，多轮迭代直至 `max_iterations` 或 `timeout`，最后整合为最终结论。
-  - 生成最终结果 JSON。
-- **边界**：终止判定仍由机械规则承载（verdict 为 pass / 达到轮数 / 超时），总控反思不引入额外的终止启发式。
+- **职责**：承担 meta 职责的全局思维管理者——半个元认识：总体认识当轮结果，批判性控制（接受合理发散，批驳过于怪异或逻辑错乱的候选），并以资源意识决定继续或收敛；当创意与验证 Agent 均未启用时，独立承担长链持续思考。
+- **形态**：由 LLM 管理，反思过程控制在要点级——提示词与输出只覆盖当轮整合结论、剩余问题、下轮方向与 continue/stop 决定（短句要点，不展开长篇推理），以有效 token 为限。
+- **输入**：初始任务、当轮候选、验证报告；长链持续思考形态下为任务与上一轮思考要点（历史超限时保留首条 + 最近 5 条）。
+- **输出**：反思要点（conclusion / remaining_issues / next_direction / decision），以及最终结构化结果。
+- **实权**（完整循环中）：
+  - `decision=stop` 参与终止判定（`controller_stop` 终止原因，优先级低于 `validation_passed`；`verdict=fail` 时 stop 无效——验证判定存在严重问题不得提前定稿）；
+  - 未终止时 `next_direction` 作为下轮创意 Agent 的修正方向输入，实现"反思调整输入，继续下一轮"。
+- **边界**：硬性上限（`max_iterations` / `timeout`）仍由机械规则承载，总控只能提前收敛、不能突破上限。
 
 ### 4.3 主循环流程
 
@@ -143,14 +145,15 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
         接入层封装为标准 JSON 响应
 ```
 
-**终止条件**（满足任一即可）：
+**终止条件**（按判定顺序，满足任一即止）：
 1. 验证 Agent 判定 `pass`（对应 `validation_passed`，仅完整循环形态）
-2. 达到 `max_iterations`
-3. 达到 `timeout`（秒）
+2. 总控 Agent 反思判定 `decision=stop`（对应 `controller_stop`，仅完整循环形态）
+3. 达到 `max_iterations`
+4. 达到 `timeout`（秒，服务端强制执行，超时即掐断进行中的 LLM 调用）
 
-循环终止完全由结构化判定与硬性上限决定，不引入置信度数值或改善趋势等启发式判据，行为可预期。
+硬性上限（轮数、超时）由结构化判定与机械规则决定，总控只能提前收敛、不能突破上限，行为可预期。
 
-多候选循环语义：创意 Agent 一次生成多个候选时，验证 Agent 对候选集整体给出判定并指明最优候选；若未通过，下一轮创意 Agent 基于该最优候选与验证问题进行修正，不再重新发散。
+多候选循环语义：创意 Agent 一次生成多个候选时，验证 Agent 对候选集整体给出判定并指明最优候选；若未通过，下一轮创意 Agent 基于该最优候选、验证问题与总控 `next_direction` 进行修正，不再重新发散。
 
 **长链持续思考形态**（两个开关均关闭）下流程简化为：总控 Agent 每轮基于任务与上一轮要点输出新的思考要点，逐轮深化；无验证 Agent 参与，故无 `validation_passed` 终止路径，仅由 `max_iterations` 与 `timeout` 决定终止；最终由总控整合所有轮次为最终结论。
 
@@ -161,11 +164,13 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 模型管理采用提供商注册表 + 按 Agent 路由（借鉴 DPIM 的 BYOK 模式独立实现）：
 
 - `providers`：注册多个 OpenAI 兼容提供商，各含 `base_url`、`api_key`、`models`（可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 120）。
+- `mcp_servers`：MCP 服务器注册表（Streamable HTTP），条目含 `preset`（内置预设 tavily/exa/deepwiki/fetch）或 `url`、`api_key`、`enabled`、`timeout`（默认 60）、`allowed_tools`（工具白名单）；验证 Agent 经 `agents.validator.mcp_servers` 引用，可用才调用。
 - `agents`：三个 Agent 各自通过 `provider` + `model` 指向注册表条目，可分别使用不同提供商、不同模型。
-- Agent 级公共参数：`temperature`（采样温度，creative 默认 0.8，validator/controller 默认 0.3）、`max_tokens`（单次请求最大输出 token 数，creative/validator 默认 2048，controller 默认 1024）、`timeout`（可选，单请求超时，设置后覆盖所属提供商值）；另有各 Agent 专属参数（creative 的 `num_candidates`，validator 的 `enable_web_search`/`web_sources`，controller 的 `log_intermediate`）。
+- Agent 级公共参数：`temperature`（采样温度，creative 默认 0.8，validator/controller 默认 0.3）、`max_tokens`（单次请求最大输出 token 数，creative/validator 默认 2048，controller 默认 1024）、`timeout`（可选，单请求超时，设置后覆盖所属提供商值）；另有各 Agent 专属参数（creative 的 `num_candidates`，validator 的 `enable_web_search`/`web_sources`/`mcp_servers`，controller 的 `log_intermediate`）。
 - 参数优先级（从高到低）：请求内 `config`（仅运行时参数） > Agent 级 > 提供商级 > 内置默认值。
 - `enable_creative` / `enable_validator`：创意与验证 Agent 启用开关的全局默认值（均默认 true），请求体顶层可对当次调用覆盖；controller 恒启用，无开关。
-- `api_key` 仅存于配置文件；`GET /api/config` 返回时省略该字段，不回显。
+- `admin_token`（可选）：管理令牌，设置后 PUT /api/config、POST /api/config/reset、GET /api/logs 要求 `X-Admin-Token` 请求头；/api/invoke 与 GET /api/config 恒开放。
+- `api_key` 与 `admin_token` 仅存于配置文件；`GET /api/config` 返回时省略这些字段，不回显。
 - 本地模型：Ollama、llama.cpp、LM Studio 等本地推理服务经其 OpenAI 兼容接口接入，无需额外适配；本地推理较慢，建议放宽该提供商的 `timeout`（如 600），并相应调大全局 `timeout`。
 
 示例结构：
@@ -176,6 +181,7 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
   "timeout": 300,
   "enable_creative": true,
   "enable_validator": true,
+  "admin_token": null,
   "providers": {
     "deepseek": {
       "base_url": "https://api.deepseek.com/v1",
@@ -187,6 +193,15 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
       "api_key": "not-set",
       "models": ["llama3:8b"],
       "timeout": 600
+    }
+  },
+  "mcp_servers": {
+    "tavily": {
+      "preset": "tavily",
+      "api_key": "tvly-...",
+      "enabled": true,
+      "timeout": 60,
+      "allowed_tools": []
     }
   },
   "agents": {
@@ -204,7 +219,8 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
       "max_tokens": 2048,
       "timeout": 300,
       "enable_web_search": false,
-      "web_sources": ["wikipedia.org", "gov.cn", "edu.cn"]
+      "web_sources": ["wikipedia.org", "gov.cn", "edu.cn"],
+      "mcp_servers": []
     },
     "controller": {
       "provider": "deepseek",
@@ -226,6 +242,8 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 #### 4.5.1 调用 BTCM
 
 - **POST** `/api/invoke`
+
+并发上限默认 4（满载立即返回 429 `RATE_LIMITED`，不排队），防止失误循环或误调用打爆模型账单；成功响应 `data` 可含 `usage` 计量（prompt/completion tokens、llm_calls、tool_calls）。
 
 请求体（JSON）：
 
@@ -277,13 +295,19 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 
 - **PUT** `/api/config`
 
-接收部分配置更新，校验通过后持久化到 `btcmodule/btcm.json` 并立即生效。是否需要密码保护列为待定问题，当前版本不实现。
+接收部分配置更新，校验通过后持久化到 `btcmodule/btcm.json` 并立即生效。配置 `admin_token` 后，本端点与 `POST /api/config/reset`、`GET /api/logs` 要求请求头 `X-Admin-Token`，缺失或错误返回 401 `UNAUTHORIZED`；`admin_token` 仅可写入、不回显。
 
 #### 4.5.4 查看调用历史
 
 - **GET** `/api/logs?limit=20`
 
-返回最近的调用记录摘要（不包括完整中间日志）。
+返回最近的调用记录摘要（不包括完整中间日志；配置 admin_token 后需 `X-Admin-Token`）。
+
+#### 4.5.5 健康检查
+
+- **GET** `/api/health`
+
+探活端点：返回 `{status, version, uptime_s}`，恒开放、无敏感信息。
 
 ## 5. 前端控制面板设计
 
@@ -307,7 +331,7 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 - 使用 **Naive UI** 组件库搭建界面。
 - API 封装在 `src/api/client.ts`，统一处理请求和错误。
 - 路由：`/` 重定向到 Dashboard，`/config` 配置页，`/logs` 日志页。
-- 构建命令：`npm run build`，输出到 `btcwebui/build/`，然后复制到 `btcmodule/static/` 供 FastAPI 托管。
+- 构建命令：`pnpm build`，输出到 `btcwebui/build/`，postbuild 自动复制到 `btcmodule/static/` 供 FastAPI 托管。
 
 ## 6. 构成与运行
 
@@ -317,12 +341,13 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
   - 运行：`uvicorn btcmodule.main:app --port 8000`
   - 通过 API 即可完成调用、配置管理与日志查看，不依赖控制面板。
 - **控制面板（btcwebui）**：本体功能验证无误后开发。
-  - 构建命令：`npm run build`，输出到 `btcwebui/build/`，然后复制到 `btcmodule/static/` 供 FastAPI 托管。
+- 构建命令：`pnpm build`，输出到 `btcwebui/build/`，postbuild 自动复制到 `btcmodule/static/` 供 FastAPI 托管（先清空再复制，无陈旧产物）。
+- 分包策略：路由级懒加载 + `unplugin-vue-components` 按需引入 naive-ui（不再全量 `use(naive)`），`manualChunks` 仅固定 vue/vue-router，已用组件由 rollup 自动聚合为共享 chunk。
   - 面板就绪后，访问 `http://localhost:8000` 即可同时获得 API 和控制面板，再进行联调。
 
 ### 6.1 依赖管理
-- 后端：`requirements.txt` 列出 fastapi, uvicorn, pydantic, openai 等。
-- 前端：`package.json` 管理依赖，使用 npm。
+- 后端：`btcmodule/pyproject.toml`（uv 管理）：fastapi、uvicorn[standard]、pydantic、openai、httpx（MCP Streamable HTTP）。
+- 前端：`btcwebui/package.json`（pnpm 管理）；构建工具 vite，dev 依赖含 `unplugin-vue-components` 与 naive-ui 解析器。
 
 ## 7. 扩展性与后续规划
 
