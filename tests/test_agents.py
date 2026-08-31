@@ -21,12 +21,29 @@ def _run(coro):
 
 
 class CreativeAgentTest(unittest.TestCase):
-    def test_generate_returns_candidates(self):
+    def test_generate_returns_candidates_and_conclusion(self):
         h = TestHarness()
         try:
             agent = CreativeAgent(h.cm, h.gateway)
             result = _run(agent.generate(make_task(), None, None, None))
-            self.assertEqual(result, ["候选方案A（理由）", "候选方案B（理由）"])
+            self.assertEqual(
+                result["candidates"], ["候选方案A（理由）", "候选方案B（理由）"]
+            )
+            self.assertEqual(result["conclusion"], "综合推荐说明")
+        finally:
+            h.close()
+
+    def test_generate_conclusion_fallback_joins_candidates(self):
+        """conclusion 缺失时回退为候选串联，仍覆盖全部候选。"""
+        h = TestHarness(
+            sequences={
+                "creative": ['{"candidates": ["甲方案", "乙方案"]}']
+            }
+        )
+        try:
+            agent = CreativeAgent(h.cm, h.gateway)
+            result = _run(agent.generate(make_task(), None, None, None))
+            self.assertEqual(result["conclusion"], "甲方案；乙方案")
         finally:
             h.close()
 
@@ -35,7 +52,7 @@ class CreativeAgentTest(unittest.TestCase):
         try:
             agent = CreativeAgent(h.cm, h.gateway)
             result = _run(agent.generate(make_task(), None, None, None))
-            self.assertEqual(len(result), 2)
+            self.assertEqual(len(result["candidates"]), 2)
             # 第一次解析失败重试，第二次成功 → 共调用两次
             self.assertEqual(len(h.fake.calls), 2)
         finally:

@@ -1,8 +1,8 @@
 """创意生成 Agent（Creative Agent）。
 
 职责：针对用户问题或给定候选，发散式生成多个候选方案。
-输入：任务、当前候选（可选）、上一轮验证反馈（可选）。
-输出：候选内容列表，每项为含简要理由的方案文本。
+输入：任务、当前候选（可选）、上一轮验证反馈（可选）、总控下轮方向（可选）。
+输出：{"candidates": [...], "conclusion": 综合全部候选的推荐说明}。
 """
 
 from __future__ import annotations
@@ -24,8 +24,9 @@ class CreativeAgent:
         current_candidate: str | None,
         validation_feedback: dict | None,
         runtime: RuntimeConfig | None,
-    ) -> list[str]:
-        """生成候选列表。首轮发散生成；后续轮基于最优候选与验证问题修正。"""
+        next_direction: str | None = None,
+    ) -> dict:
+        """生成候选列表与综合结论。首轮发散生成；后续轮基于最优候选与验证问题修正。"""
 
         def _bullet(items: list[str]) -> str:
             return "\n".join(f"- {item}" for item in items)
@@ -50,9 +51,13 @@ class CreativeAgent:
             "首轮（无验证反馈时）发散生成多个多样候选；"
             "后续轮（有验证反馈时）基于最优候选与验证问题修正，"
             "生成少量修正候选，不重新发散。\n"
-            "每个候选必须是完整可用的方案文本，并包含简要理由。\n"
-            "输出必须严格是 JSON 对象，格式为："
-            '{"candidates": ["候选1", "候选2", ...]}'
+            "发散是被鼓励的：候选之间保持真实差异；"
+            "但每个候选必须完整可用、逻辑自洽，并附简要理由。\n"
+            "conclusion 必须综合全部候选：概括各候选的取舍与适用情形，"
+            "不得只突出单一候选。\n"
+            "输出必须严格是 JSON 对象，格式为：\n"
+            '{"candidates": ["候选1（含简要理由）", "候选2（含简要理由）", ...], '
+            '"conclusion": "综合全部候选的推荐说明"}'
         )
 
         user_lines = [f"任务/用户问题：{task.user_query}"]
@@ -71,13 +76,15 @@ class CreativeAgent:
             )
         else:
             user_lines.append(f"本轮为发散轮：请生成 {num_candidates} 个多样候选方案。")
+        if next_direction:
+            user_lines.append(f"总控下轮方向：{next_direction}")
 
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": "\n".join(user_lines)},
         ]
 
-        def _parse(content: str) -> list[str]:
+        def _parse(content: str) -> dict:
             obj = parse_json_object(content)
             require_keys(obj, ["candidates"], "creative")
             candidates = obj["candidates"]
@@ -87,7 +94,12 @@ class CreativeAgent:
                 or not all(isinstance(c, str) and c.strip() for c in candidates)
             ):
                 raise AgentOutputError("Agent 'creative' 输出的 candidates 非法或为空")
-            return [c.strip() for c in candidates]
+            cleaned = [c.strip() for c in candidates]
+            conclusion = str(obj.get("conclusion", "")).strip()
+            if not conclusion:
+                # 回退：候选串联，保证结论仍覆盖全部候选
+                conclusion = "；".join(cleaned)
+            return {"candidates": cleaned, "conclusion": conclusion}
 
         return await run_agent_with_retry(
             self._gateway, "creative", messages, runtime, _parse

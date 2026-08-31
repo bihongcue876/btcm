@@ -18,7 +18,10 @@ from btcmodule.core.config import ConfigManager
 from btcmodule.core.llm import LLMError, ModelGateway
 from btcmodule.core.loop import Engine
 
-CREATIVE_OUTPUT = '{"candidates": ["候选方案A（理由）", "候选方案B（理由）"]}'
+CREATIVE_OUTPUT = (
+    '{"candidates": ["候选方案A（理由）", "候选方案B（理由）"], '
+    '"conclusion": "综合推荐说明"}'
+)
 VALIDATOR_OUTPUT = (
     '{"verdict": "conditional_pass", "best_candidate": "候选方案A", '
     '"issues": ["问题1"], "suggestions": ["建议1"], "next_actions": ["行动1"]}'
@@ -26,6 +29,10 @@ VALIDATOR_OUTPUT = (
 CONTROLLER_OUTPUT = (
     '{"conclusion": "整合结论", "remaining_issues": [], '
     '"next_direction": "方向", "decision": "continue"}'
+)
+CONTROLLER_STOP_OUTPUT = (
+    '{"conclusion": "结论已可用", "remaining_issues": [], '
+    '"next_direction": "", "decision": "stop"}'
 )
 
 DEFAULT_OUTPUTS = {

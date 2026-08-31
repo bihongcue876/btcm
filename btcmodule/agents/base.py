@@ -4,15 +4,21 @@
 run_agent_with_retry 覆盖两类失败（LLM 层失败与解析失败）各重试一次：
 - creative / controller 失败没有 fail 语义，重试后抛出异常，由主循环层转为 INTERNAL_ERROR
 - validator 的降级由 validator.py 自行捕获并返回 fail 报告
+- 传入 tools 时走 chat_with_tools（工具调用循环），重试语义不变
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+from typing import Awaitable, Callable
 
 from ..core.llm import LLMError, ModelGateway
 from ..core.task import RuntimeConfig
+
+# 重试退避：429/瞬时故障立即重试基本必败，稍候再试
+RETRY_BACKOFF_SECONDS = 0.5
 
 
 class AgentOutputError(Exception):
@@ -25,12 +31,21 @@ async def run_agent_with_retry(
     messages: list[dict],
     runtime: RuntimeConfig | None,
     parse_fn,
+    tools: list[dict] | None = None,
+    tool_executor: Callable[[str, dict], Awaitable[str]] | None = None,
 ):
     """调用 LLM 并解析；LLM 失败或解析失败均重试一次，仍失败抛出最后一次异常。"""
     last_exc: Exception | None = None
-    for _ in range(2):
+    for attempt in range(2):
+        if attempt > 0:
+            await asyncio.sleep(RETRY_BACKOFF_SECONDS)
         try:
-            content = await gateway.chat(agent_name, messages, runtime)
+            if tools and tool_executor is not None:
+                content = await gateway.chat_with_tools(
+                    agent_name, messages, tools, tool_executor, runtime
+                )
+            else:
+                content = await gateway.chat(agent_name, messages, runtime)
             return parse_fn(content)
         except LLMError as e:
             last_exc = e
