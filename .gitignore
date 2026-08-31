@@ -1,4 +1,4 @@
-docs
+# BTCM
 btcmodule/btcm.json
 
 # Python
@@ -13,10 +13,11 @@ btcmodule/logs/*.jsonl
 btcmodule/static/
 
 btcwebui/build/
+btcwebui/btcmodule/
+btcwebui/components.d.ts
 btcwebui/.pnpm-store/
 btcwebui/node_modules/
 *.tsbuildinfo
 
-
-
 .workbuddy
+.opencode
