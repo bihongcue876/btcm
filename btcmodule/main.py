@@ -11,13 +11,15 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from btcmodule.api.routes import router
 from btcmodule.core.config import ConfigManager
@@ -32,7 +34,16 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 def create_app(
     config_path: str | Path | None = None,
     log_path: str | Path | None = None,
+    static_dir: str | Path | None = None,
 ) -> FastAPI:
+    # 结构化运行日志：根 logger 无 handler（直跑 uvicorn 等）时补基础配置；
+    # 已有 handler（如测试或外部装配）则不动
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        )
+    static_dir = Path(static_dir) if static_dir else STATIC_DIR
     cm = ConfigManager(path=config_path) if config_path else ConfigManager()
     gateway = ModelGateway(cm)
     engine = Engine(cm, gateway)
@@ -41,7 +52,7 @@ def create_app(
     app = FastAPI(
         title="BTCM",
         description="副思考链模块（Beside-Thinking Chain Module）",
-        version="0.9.0",
+        version="0.0.0",
     )
     app.state.config_manager = cm
     app.state.engine = engine
@@ -82,10 +93,35 @@ def create_app(
         )
         return JSONResponse(status_code=500, content=resp.model_dump())
 
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(
+        request: Request, exc: StarletteHTTPException
+    ) -> Response:
+        """统一 HTTP 异常响应（含未匹配 404）。
+
+        - Vue history 路由的深链接（如 /config、/logs）：无同名文件且无扩展名时
+          回退控制面板 index.html，由前端路由接管（spec 单端口托管约定）
+        - 其余 HTTP 异常（含 /api 下的 404）返回统一外层结构
+        """
+        path = request.url.path
+        if exc.status_code == 404 and not path.startswith("/api"):
+            index = static_dir / "index.html"
+            if index.is_file() and "." not in Path(path).name:
+                return FileResponse(index)
+        rid = str(uuid.uuid4())
+        resp = fail(
+            ErrorInfo(
+                code="NOT_FOUND" if exc.status_code == 404 else "HTTP_ERROR",
+                message=f"{exc.status_code}: {exc.detail}",
+            ),
+            rid,
+        )
+        return JSONResponse(status_code=exc.status_code, content=resp.model_dump())
+
     # 阶段二构建产物存在时，由本体在同一端口托管控制面板
-    if (STATIC_DIR / "index.html").exists():
+    if (static_dir / "index.html").exists():
         app.mount(
-            "/", StaticFiles(directory=STATIC_DIR, html=True), name="static"
+            "/", StaticFiles(directory=static_dir, html=True), name="static"
         )
 
     return app
