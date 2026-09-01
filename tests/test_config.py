@@ -32,12 +32,15 @@ class ConfigDefaultTest(unittest.TestCase):
         self.assertIn("deepseek", cfg.providers)
         self.assertIn("ollama-local", cfg.providers)
         self.assertEqual(
-            set(cfg.agents.keys()), {"creative", "validator", "controller"}
+            set(cfg.agents.keys()), {"creative", "validator", "controller", "meta"}
         )
         self.assertEqual(cfg.agents["creative"].temperature, 0.8)
         self.assertEqual(cfg.agents["validator"].temperature, 0.3)
         self.assertEqual(cfg.agents["controller"].max_tokens, 1024)
         self.assertEqual(cfg.agents["validator"].timeout, 300)
+        self.assertEqual(cfg.agents["meta"].temperature, 0.3)
+        self.assertEqual(cfg.agents["meta"].max_tokens, 1024)
+        self.assertEqual(cfg.agents["meta"].provider, "deepseek")
 
 
 class ConfigManagerTest(unittest.TestCase):
@@ -65,7 +68,7 @@ class ConfigManagerTest(unittest.TestCase):
         self.assertEqual(cm.config.timeout, 300)
         self.assertEqual(
             set(cm.config.agents.keys()),
-            {"creative", "validator", "controller"},
+            {"creative", "validator", "controller", "meta"},
         )
 
     def test_load_invalid_json_raises(self):
@@ -177,27 +180,17 @@ class ResolveParamsTest(unittest.TestCase):
         self.assertTrue(params["enable_web_search"])
 
     def test_route_missing_provider_raises(self):
-        self.cm.update({"agents": {"creative": {"provider": "nope"}}})
+        # Provider existence now checked at config update time;
+        # test runtime resolution path directly with a constructed config.
+        cfg = self.cm.config.model_copy(deep=True)
+        cfg.agents["creative"].provider = "nope"
         with self.assertRaises(ConfigError):
-            resolve_agent_route(self.cm.config, "creative")
+            resolve_agent_route(cfg, "creative")
 
     def test_gateway_chat_propagates_route_error(self):
-        """模型网关对路由错误的处理：在不联网情况下即抛 ConfigError，不吞异常。"""
-        from btcmodule.core.llm import ModelGateway
-        from btcmodule.core.task import RuntimeConfig
-
-        import asyncio
-
-        self.cm.update({"agents": {"validator": {"provider": "nope"}}})
-        gw = ModelGateway(self.cm)
+        """update 时校验 provider 存在且启用，无效路由在持久化阶段即被拒绝。"""
         with self.assertRaises(ConfigError):
-            asyncio.run(
-                gw.chat(
-                    "validator",
-                    [{"role": "user", "content": "hi"}],
-                    RuntimeConfig(),
-                )
-            )
+            self.cm.update({"agents": {"validator": {"provider": "nope"}}})
 
 
 class GatewayFriendlyErrorTest(unittest.TestCase):

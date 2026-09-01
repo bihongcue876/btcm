@@ -35,10 +35,20 @@ CONTROLLER_STOP_OUTPUT = (
     '"next_direction": "", "decision": "stop"}'
 )
 
+META_OUTPUT = (
+    '{"conclusion": "meta 整合结论", "remaining_issues": [], '
+    '"next_direction": "方向", "decision": "continue"}'
+)
+META_STOP_OUTPUT = (
+    '{"conclusion": "结论已可用", "remaining_issues": [], '
+    '"next_direction": "", "decision": "stop"}'
+)
+
 DEFAULT_OUTPUTS = {
     "creative": CREATIVE_OUTPUT,
     "validator": VALIDATOR_OUTPUT,
     "controller": CONTROLLER_OUTPUT,
+    "meta": META_OUTPUT,
 }
 
 
@@ -77,6 +87,7 @@ class FakeChat:
             return '{"conclusion": "最终结论"}'
         if "长链持续思考" in sys_content:
             return '{"thought": "本轮思考要点"}'
+        # meta agent 走默认输出，无需特殊匹配
 
         if agent_name in self.default_outputs:
             return self.default_outputs[agent_name]

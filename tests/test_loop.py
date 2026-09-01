@@ -10,7 +10,7 @@ from btcmodule.core.result import BTCMError
 from .common import (
     TestHarness,
     VALIDATOR_OUTPUT,
-    CONTROLLER_STOP_OUTPUT,
+    META_STOP_OUTPUT,
     make_task,
 )
 
@@ -127,7 +127,7 @@ class HybridTest(unittest.TestCase):
                 h.engine.run(
                     make_task(
                         runtime_config={
-                            "agents": {"controller": {"log_intermediate": False}}
+                            "agents": {"meta": {"log_intermediate": False}}
                         }
                     )
                 )
@@ -136,9 +136,9 @@ class HybridTest(unittest.TestCase):
         finally:
             h.close()
 
-    def test_hybrid_controller_stop_terminates_early(self):
-        """总控 decision=stop 参与终止判定：validation_passed 优先，其次 controller_stop。"""
-        h = TestHarness(sequences={"controller": [CONTROLLER_STOP_OUTPUT]})
+    def test_hybrid_meta_stop_terminates_early(self):
+        """meta decision=stop 参与终止判定：validation_passed 优先，其次 controller_stop。"""
+        h = TestHarness(sequences={"meta": [META_STOP_OUTPUT]})
         try:
             data = _run(h.engine.run(make_task()))
             self.assertEqual(data["termination_reason"], "controller_stop")
@@ -148,7 +148,7 @@ class HybridTest(unittest.TestCase):
             h.close()
 
     def test_hybrid_next_direction_feeds_creative(self):
-        """总控 next_direction 回灌下一轮创意输入。"""
+        """meta next_direction 回灌下一轮创意输入。"""
         h = TestHarness()
         try:
             _run(h.engine.run(make_task()))
@@ -166,16 +166,16 @@ class HybridTest(unittest.TestCase):
         try:
             data = _run(h.engine.run(make_task()))
             for entry in data["intermediate_log"]:
-                self.assertIn("next_direction", entry["controller_reflection"])
+                self.assertIn("next_direction", entry["meta_reflection"])
         finally:
             h.close()
 
-    def test_hybrid_fail_forbids_controller_stop(self):
-        """验证判定 fail 时总控不得提前 stop：强制继续修正轮，不得定稿失败。"""
+    def test_hybrid_fail_forbids_meta_stop(self):
+        """验证判定 fail 时 meta 不得提前 stop：强制继续修正轮，不得定稿失败。"""
         h = TestHarness(
             sequences={
                 "validator": [VALIDATOR_FAIL, VALIDATOR_FAIL],
-                "controller": [CONTROLLER_STOP_OUTPUT, CONTROLLER_STOP_OUTPUT],
+                "meta": [META_STOP_OUTPUT, META_STOP_OUTPUT],
             }
         )
         try:

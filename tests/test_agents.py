@@ -1,4 +1,4 @@
-"""三个 Agent 的单元测试：提示词构造、结构化解析、失败重试与降级。"""
+"""四个 Agent 的单元测试：提示词构造、结构化解析、失败重试与降级。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import unittest
 
 from btcmodule.agents.controller import ControllerAgent
 from btcmodule.agents.creative import CreativeAgent
+from btcmodule.agents.meta import MetaAgent
 from btcmodule.agents.validator import ValidatorAgent
 from btcmodule.core.llm import LLMError
 
@@ -122,11 +123,11 @@ class ValidatorAgentTest(unittest.TestCase):
             h.close()
 
 
-class ControllerAgentTest(unittest.TestCase):
+class MetaAgentTest(unittest.TestCase):
     def test_reflect(self):
         h = TestHarness()
         try:
-            agent = ControllerAgent(h.cm, h.gateway)
+            agent = MetaAgent(h.cm, h.gateway)
             result = _run(
                 agent.reflect(
                     make_task(),
@@ -136,11 +137,13 @@ class ControllerAgentTest(unittest.TestCase):
                     None,
                 )
             )
-            self.assertEqual(result["conclusion"], "整合结论")
+            self.assertEqual(result["conclusion"], "meta 整合结论")
             self.assertEqual(result["decision"], "continue")
         finally:
             h.close()
 
+
+class ControllerAgentTest(unittest.TestCase):
     def test_think(self):
         h = TestHarness()
         try:

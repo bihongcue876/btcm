@@ -99,20 +99,21 @@ class ResolveUrlTest(unittest.TestCase):
         return MCPServerConfig(**kwargs)
 
     def test_preset_without_key(self):
-        url = resolve_mcp_url(self._srv(preset="deepwiki"))
+        url = resolve_mcp_url("test-srv", self._srv(preset="deepwiki"))
         self.assertEqual(url, "https://mcp.deepwiki.com/mcp")
 
     def test_preset_with_key_substituted(self):
-        url = resolve_mcp_url(self._srv(preset="tavily", api_key="tvly-abc"))
+        url = resolve_mcp_url("test-srv", self._srv(preset="tavily", api_key="tvly-abc"))
         self.assertIn("tvly-abc", url)
 
     def test_preset_needing_key_without_key_raises(self):
         with self.assertRaises(ConfigError):
-            resolve_mcp_url(self._srv(preset="tavily"))
+            resolve_mcp_url("test-srv", self._srv(preset="tavily"))
 
     def test_direct_url_wins(self):
         url = resolve_mcp_url(
-            self._srv(url="http://localhost:9999/mcp", preset="tavily")
+            "test-srv",
+            self._srv(url="http://localhost:9999/mcp", preset="tavily", allow_private=True),
         )
         self.assertEqual(url, "http://localhost:9999/mcp")
 
