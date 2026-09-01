@@ -1,6 +1,6 @@
 # BTCM（Beside-Thinking Chain Module，副思考链模块）
 
-可嵌入大型集成 Agent 的辅助思考器官：接收思考任务，内部由创意生成、验证、总控三个 Agent 经“生成-验证-反思”循环处理后返回结构化结果。总控承担元认知式的全局思维管理（可提前收敛终止），验证 Agent 可按需接入 MCP 联网工具。服务无状态，自带 Web 控制面板，单端口运行。
+可嵌入大型集成 Agent 的辅助思考器官：接收思考任务，内部由创意生成、验证、长链总控（controller）与检查管理（meta）四个 Agent 经“生成-验证-反思”循环处理后返回结构化结果。meta 承担元认知式的全局思维管理（可提前收敛终止），验证 Agent 可按需接入 MCP 联网工具。服务无状态，自带 Web 控制面板，单端口运行。
 
 - 总体设计：[share/spec.md](share/spec.md)
 - Agent 设计：[docs/Agents.md](docs/Agents.md)
@@ -40,6 +40,8 @@ curl -X PUT http://localhost:8000/api/config \
   -H "Content-Type: application/json" \
   -d '{"admin_token":"your-token"}'
 ```
+
+可选：锁定 invoke（`lock_invoke=true`，开启后 /api/invoke 也需 `X-Admin-Token`，用于开放到局域网时保护付费模型）。密钥亦可用环境变量注入（`BTCM_ADMIN_TOKEN`、`BTCM_PROVIDER_<NAME>_API_KEY`、`BTCM_MCP_<NAME>_API_KEY`），优先级高于配置文件且不回写、不回显。
 
 可选：为验证 Agent 接入 MCP 联网工具（可用才调用，不可用自动退回纯逻辑验证）：
 

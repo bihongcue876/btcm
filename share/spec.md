@@ -2,7 +2,7 @@
 
 ## 1. 项目概述
 
-BTCM（Beside-Thinking Chain Module，副思考链模块）是一个可嵌入大型集成 Agent 的辅助思考器官。它接收外部传入的“思考任务”，内部通过三个核心 Agent（创意生成、验证、总控）协作，完成验证、创意生成或混合任务，并以结构化 JSON 返回结果。
+BTCM（Beside-Thinking Chain Module，副思考链模块）是一个可嵌入大型集成 Agent 的辅助思考器官。它接收外部传入的“思考任务”，内部通过四个核心 Agent（创意生成、验证、长链思考总控、检查管理 meta）协作，完成验证、创意生成或混合任务，并以结构化 JSON 返回结果。
 
 定位与边界：
 
@@ -31,12 +31,13 @@ project-root/
 │   │   ├── llm.py             # 模型网关：提供商注册表 + 按 Agent 路由 + 工具调用循环
 │   │   ├── mcp.py             # MCP 最小客户端（Streamable HTTP）与工具管理
 │   │   ├── logger.py          # 调用日志（JSONL，内存镜像 + 上限裁剪）
-│   │   └── loop.py            # 主循环控制器（总控 Agent）
+│   │   └── loop.py            # 主循环控制器（Engine）
 │   ├── agents/
 │   │   ├── __init__.py
 │   │   ├── creative.py        # 创意生成 Agent
 │   │   ├── validator.py       # 验证 Agent
-│   │   └── controller.py      # 总控 Agent（含反思）
+│   │   ├── controller.py      # 总控 Agent（长链思考）
+│   │   └── meta.py            # meta Agent（完整循环检查与管理）
 │   ├── api/
 │   │   ├── __init__.py
 │   │   └── routes.py          # REST API 路由
@@ -81,20 +82,20 @@ project-root/
 ## 4. 后端核心设计
 
 ### 4.1 运行形态
-BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_creative`（创意生成 Agent）与 `enable_validator`（验证 Agent），均默认开启；总控 Agent（controller）恒启用，无开关。四种组合对应四种形态：
+BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_creative`（创意生成 Agent）与 `enable_validator`（验证 Agent），均默认开启；总控类 Agent（controller / meta）恒启用，无开关。四种组合对应四种形态：
 
 | enable_creative | enable_validator | 形态 | 说明 |
 |-----------------|-----------------|------|------|
 | true | true | 完整循环 | 创意生成-验证-反思循环，直到满足终止条件（默认） |
 | true | false | 纯创意 | 只调用创意生成 Agent，生成方案或观点，返回候选列表 |
 | false | true | 纯验证 | 只调用验证 Agent，检查已有结论/计划，返回 verdict 及问题报告 |
-| false | false | 长链持续思考 | 只调用总控 Agent，多轮自我迭代思考并产出最终结论 |
+| false | false | 长链持续思考 | 只调用 controller，多轮自我迭代思考并产出最终结论 |
 
-纯创意与纯验证为单次执行，不进入循环（`iterations_used` 恒为 1，`termination_reason` 恒为 `single_pass`）；设计理念中“反复自思考和自验证”的能力由完整循环与长链持续思考两种形态承担，前者通过创意/验证 Agent 协作，后者由总控 Agent 独立完成。开关的全局默认值可经配置持久化，请求体顶层字段可对当次调用覆盖。
+纯创意与纯验证为单次执行，不进入循环（`iterations_used` 恒为 1，`termination_reason` 恒为 `single_pass`）；设计理念中“反复自思考和自验证”的能力由完整循环与长链持续思考两种形态承担，前者通过创意/验证/meta Agent 协作，后者由 controller Agent 独立完成。开关的全局默认值可经配置持久化，请求体顶层字段可对当次调用覆盖。
 
 ### 4.2 核心 Agent
 
-三个 Agent 的职责相互独立，各自经模型网关路由到独立的提供商与模型（见 4.4），互不绑定同一模型。
+四个 Agent 的职责相互独立，各自经模型网关路由到独立的提供商与模型（见 4.4），互不绑定同一模型。
 
 #### 4.2.1 创意生成 Agent（Creative Agent）
 - **职责**：针对用户问题或给定候选，发散式地生成多个新方案、观点、修正建议。
@@ -111,28 +112,35 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
   - **事实验证**：经 MCP 联网工具核对事实依据。`enable_web_search` 为工具总开关，`mcp_servers` 指向注册表中启用的服务器（内置市面预设 tavily/exa/deepwiki/fetch）；工具经 OpenAI function calling 调用，遵循"可用才调用"——服务器不可用时静默降级为纯逻辑验证。`web_sources` 作为期望权威域名写入提示词。
 
 #### 4.2.3 总控 Agent（Controller Agent）
-- **职责**：承担 meta 职责的全局思维管理者——半个元认识：总体认识当轮结果，批判性控制（接受合理发散，批驳过于怪异或逻辑错乱的候选），并以资源意识决定继续或收敛；当创意与验证 Agent 均未启用时，独立承担长链持续思考。
-- **形态**：由 LLM 管理，反思过程控制在要点级——提示词与输出只覆盖当轮整合结论、剩余问题、下轮方向与 continue/stop 决定（短句要点，不展开长篇推理），以有效 token 为限。
-- **输入**：初始任务、当轮候选、验证报告；长链持续思考形态下为任务与上一轮思考要点（历史超限时保留首条 + 最近 5 条）。
-- **输出**：反思要点（conclusion / remaining_issues / next_direction / decision），以及最终结构化结果。
+- **职责**：当创意与验证 Agent 均未启用时，作为唯一执行者独立承担长链持续思考——每轮批判性深化（think），最终整合全部轮次为最终结论（finalize）。
+- **形态**：要点级输出，每轮只产出新的思考要点，不重复已有内容、不展开长篇推理。
+- **输入**：初始任务、上一轮思考要点（历史超限时保留首条 + 最近 5 条）。
+- **输出**：每轮思考要点（`thought`），最终结论（`conclusion`）。
+- **边界**：无 `validation_passed` 终止路径，仅由 `max_iterations` / `timeout` 机械规则决定终止。
+
+#### 4.2.4 meta Agent（Meta Agent）
+- **职责**：完整循环中的检查与管理——以半个元认识的视角总体认识当轮结果，批判性控制（接受合理发散，批驳过于怪异或逻辑错乱的候选），并以资源意识决定继续或收敛。
+- **形态**：反思过程控制在要点级——提示词与输出只覆盖当轮整合结论、剩余问题、下轮方向与 continue/stop 决定（短句要点，不展开长篇推理），以有效 token 为限。
+- **输入**：初始任务、当轮候选、验证报告。
+- **输出**：反思要点（conclusion / remaining_issues / next_direction / decision）。
 - **实权**（完整循环中）：
   - `decision=stop` 参与终止判定（`controller_stop` 终止原因，优先级低于 `validation_passed`；`verdict=fail` 时 stop 无效——验证判定存在严重问题不得提前定稿）；
   - 未终止时 `next_direction` 作为下轮创意 Agent 的修正方向输入，实现"反思调整输入，继续下一轮"。
-- **边界**：硬性上限（`max_iterations` / `timeout`）仍由机械规则承载，总控只能提前收敛、不能突破上限。
+- **边界**：硬性上限（`max_iterations` / `timeout`）仍由机械规则承载，meta 只能提前收敛、不能突破上限。
 
 ### 4.3 主循环流程
 
 ```
 外部请求 → 接入层解析为 Task 对象
                 ↓
-        总控 Agent 启动循环
+        Engine（主循环）启动循环
                 ↓
    ┌─────────── 循环（最多 max_iterations 轮）───────────┐
    │  创意 Agent（若需要）→ 生成候选集                    │
    │          ↓                                          │
    │  验证 Agent（若需要）→ 验证候选，输出判定与问题      │
    │          ↓                                          │
-   │  总控 Agent 反思：                                   │
+   │  meta Agent（检查与管理）反思：                      │
    │     - 整合结果                                      │
    │     - 判断是否满足终止条件                           │
    │          │                                          │
@@ -140,22 +148,22 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
    │          └── 否 → 调整输入，继续下一轮               │
    └──────────────────────────────────────────────────┘
                 ↓
-        总控 Agent 生成最终结果
+        组装最终结果
                 ↓
         接入层封装为标准 JSON 响应
 ```
 
 **终止条件**（按判定顺序，满足任一即止）：
 1. 验证 Agent 判定 `pass`（对应 `validation_passed`，仅完整循环形态）
-2. 总控 Agent 反思判定 `decision=stop`（对应 `controller_stop`，仅完整循环形态）
+2. meta Agent 反思判定 `decision=stop`（对应 `controller_stop`，仅完整循环形态）
 3. 达到 `max_iterations`
 4. 达到 `timeout`（秒，服务端强制执行，超时即掐断进行中的 LLM 调用）
 
-硬性上限（轮数、超时）由结构化判定与机械规则决定，总控只能提前收敛、不能突破上限，行为可预期。
+硬性上限（轮数、超时）由结构化判定与机械规则决定，meta 只能提前收敛、不能突破上限，行为可预期。
 
-多候选循环语义：创意 Agent 一次生成多个候选时，验证 Agent 对候选集整体给出判定并指明最优候选；若未通过，下一轮创意 Agent 基于该最优候选、验证问题与总控 `next_direction` 进行修正，不再重新发散。
+多候选循环语义：创意 Agent 一次生成多个候选时，验证 Agent 对候选集整体给出判定并指明最优候选；若未通过，下一轮创意 Agent 基于该最优候选、验证问题与 meta `next_direction` 进行修正，不再重新发散。
 
-**长链持续思考形态**（两个开关均关闭）下流程简化为：总控 Agent 每轮基于任务与上一轮要点输出新的思考要点，逐轮深化；无验证 Agent 参与，故无 `validation_passed` 终止路径，仅由 `max_iterations` 与 `timeout` 决定终止；最终由总控整合所有轮次为最终结论。
+**长链持续思考形态**（两个开关均关闭）下流程简化为：controller 每轮基于任务与上一轮要点输出新的思考要点，逐轮深化；无验证 Agent 参与，故无 `validation_passed` 终止路径，仅由 `max_iterations` 与 `timeout` 决定终止；最终由 controller 整合所有轮次为最终结论。
 
 ### 4.4 配置体系（本体）
 
@@ -164,13 +172,14 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 模型管理采用提供商注册表 + 按 Agent 路由（借鉴 DPIM 的 BYOK 模式独立实现）：
 
 - `providers`：注册多个 OpenAI 兼容提供商，各含 `base_url`、`api_key`、`models`（可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 120）。
-- `mcp_servers`：MCP 服务器注册表（Streamable HTTP），条目含 `preset`（内置预设 tavily/exa/deepwiki/fetch）或 `url`、`api_key`、`enabled`、`timeout`（默认 60）、`allowed_tools`（工具白名单）；验证 Agent 经 `agents.validator.mcp_servers` 引用，可用才调用。
-- `agents`：三个 Agent 各自通过 `provider` + `model` 指向注册表条目，可分别使用不同提供商、不同模型。
-- Agent 级公共参数：`temperature`（采样温度，creative 默认 0.8，validator/controller 默认 0.3）、`max_tokens`（单次请求最大输出 token 数，creative/validator 默认 2048，controller 默认 1024）、`timeout`（可选，单请求超时，设置后覆盖所属提供商值）；另有各 Agent 专属参数（creative 的 `num_candidates`，validator 的 `enable_web_search`/`web_sources`/`mcp_servers`，controller 的 `log_intermediate`）。
+- `mcp_servers`：MCP 服务器注册表（Streamable HTTP），条目含 `preset`（内置预设 tavily/exa/deepwiki/fetch）或 `url`、`api_key`、`enabled`、`timeout`（默认 60）、`allowed_tools`（工具白名单）、`allow_private`（默认 false，指向内网/回环地址需显式放行，且 URL 仅允许 http/https）；验证 Agent 经 `agents.validator.mcp_servers` 引用，可用才调用。
+- `agents`：四个 Agent（creative / validator / controller / meta）各自通过 `provider` + `model` 指向注册表条目，可分别使用不同提供商、不同模型。
+- Agent 级公共参数：`temperature`（采样温度，creative 默认 0.8，validator/controller/meta 默认 0.3）、`max_tokens`（单次请求最大输出 token 数，creative/validator 默认 2048，controller/meta 默认 1024）、`timeout`（可选，单请求超时，设置后覆盖所属提供商值）；另有各 Agent 专属参数（creative 的 `num_candidates`，validator 的 `enable_web_search`/`web_sources`/`mcp_servers`，meta 的 `log_intermediate`）。
 - 参数优先级（从高到低）：请求内 `config`（仅运行时参数） > Agent 级 > 提供商级 > 内置默认值。
-- `enable_creative` / `enable_validator`：创意与验证 Agent 启用开关的全局默认值（均默认 true），请求体顶层可对当次调用覆盖；controller 恒启用，无开关。
+- `enable_creative` / `enable_validator`：创意与验证 Agent 启用开关的全局默认值（均默认 true），请求体顶层可对当次调用覆盖；总控类 Agent（controller / meta）恒启用，无开关。
 - `admin_token`（可选）：管理令牌，设置后 PUT /api/config、POST /api/config/reset、GET /api/logs 要求 `X-Admin-Token` 请求头；/api/invoke 与 GET /api/config 恒开放。
-- `api_key` 与 `admin_token` 仅存于配置文件；`GET /api/config` 返回时省略这些字段，不回显。
+- `lock_invoke`（可选，默认 false）：开启后 /api/invoke 也要求 `X-Admin-Token`（保护开放到局域网时的付费模型调用）。
+- `api_key` 与 `admin_token` 仅存于配置文件；`GET /api/config` 返回时省略这些字段，不回显。密钥亦可经环境变量注入（`BTCM_ADMIN_TOKEN`、`BTCM_PROVIDER_<NAME>_API_KEY`、`BTCM_MCP_<NAME>_API_KEY`），优先级高于配置文件且不回写、不回显。
 - 本地模型：Ollama、llama.cpp、LM Studio 等本地推理服务经其 OpenAI 兼容接口接入，无需额外适配；本地推理较慢，建议放宽该提供商的 `timeout`（如 600），并相应调大全局 `timeout`。
 
 示例结构：
@@ -182,6 +191,7 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
   "enable_creative": true,
   "enable_validator": true,
   "admin_token": null,
+  "lock_invoke": false,
   "providers": {
     "deepseek": {
       "base_url": "https://api.deepseek.com/v1",
@@ -223,6 +233,12 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
       "mcp_servers": []
     },
     "controller": {
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "temperature": 0.3,
+      "max_tokens": 1024
+    },
+    "meta": {
       "provider": "deepseek",
       "model": "deepseek-chat",
       "temperature": 0.3,
@@ -352,7 +368,7 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 ## 7. 扩展性与后续规划
 
 - **Agent 插件化**：定义 `BaseAgent` 接口，允许注册新的思维单元（如安全审核、情感分析），通过配置启用。
-- **思维格式引擎**：未来支持链式、树状、辩论等多种格式，由总控 Agent 选择。
+- **思维格式引擎**：未来支持链式、树状、辩论等多种格式，由 meta Agent 选择。
 - **WebSocket 实时监控**：在循环过程中推送中间状态，提升控制面板体验。
 - **CLI 工具**：提供命令行调用方式，方便测试和脚本集成。
 
