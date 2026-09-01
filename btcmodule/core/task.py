@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class RuntimeAgentConfig(BaseModel):
@@ -42,13 +42,21 @@ class InvokeRequest(BaseModel):
     """
 
     request_id: str | None = None
-    user_query: str = Field(..., min_length=1)
-    candidate: str | None = None
-    evidence: list[str] = Field(default_factory=list)
-    context_summary: str | None = None
+    user_query: str = Field(..., min_length=1, max_length=20000)
+    candidate: str | None = Field(default=None, max_length=20000)
+    evidence: list[str] = Field(default_factory=list, max_length=100)
+    context_summary: str | None = Field(default=None, max_length=300000)
     enable_creative: bool | None = None
     enable_validator: bool | None = None
     config: RuntimeConfig | None = None
+
+    @field_validator("evidence")
+    @classmethod
+    def _check_evidence(cls, v: list[str]) -> list[str]:
+        for i, item in enumerate(v):
+            if len(item) > 20000:
+                raise ValueError(f"evidence[{i}] 超过 20000 字符上限")
+        return v
 
 
 class Task(BaseModel):

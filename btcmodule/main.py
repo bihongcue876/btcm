@@ -43,6 +43,9 @@ def create_app(
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(name)s %(message)s",
         )
+    # 生产环境抬升 httpx/httpcore 日志级别，避免请求 URL（含 MCP 密钥）泄漏
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     static_dir = Path(static_dir) if static_dir else STATIC_DIR
     cm = ConfigManager(path=config_path) if config_path else ConfigManager()
     gateway = ModelGateway(cm)
@@ -56,6 +59,7 @@ def create_app(
     )
     app.state.config_manager = cm
     app.state.engine = engine
+    app.state.gateway = gateway
     app.state.logger = logger
 
     app.include_router(router)

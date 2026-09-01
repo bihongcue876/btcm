@@ -17,6 +17,7 @@ import asyncio
 
 from ..agents.controller import ControllerAgent
 from ..agents.creative import CreativeAgent
+from ..agents.meta import MetaAgent
 from ..agents.validator import ValidatorAgent
 from .config import ConfigManager, resolve_agent_params, resolve_global_params
 from .llm import LLMError, ModelGateway
@@ -49,6 +50,7 @@ class Engine:
         self._creative = CreativeAgent(cm, gateway)
         self._validator = ValidatorAgent(cm, gateway, self._mcp)
         self._controller = ControllerAgent(cm, gateway)
+        self._meta = MetaAgent(cm, gateway)
 
     @property
     def config(self):
@@ -79,7 +81,7 @@ class Engine:
     async def _run_hybrid(self, task: Task) -> dict:
         runtime = task.runtime_config
         max_iterations, timeout = resolve_global_params(self.config, runtime)
-        params = resolve_agent_params(self.config, runtime, "controller")
+        params = resolve_agent_params(self.config, runtime, "meta")
         log_intermediate = bool(params["log_intermediate"])
 
         current_candidate = task.candidate
@@ -109,8 +111,8 @@ class Engine:
                         task, candidates, runtime
                     )
                     reflection = await self._safe_call(
-                        "controller",
-                        lambda: self._controller.reflect(
+                        "meta",
+                        lambda: self._meta.reflect(
                             task, candidates, report, iteration, runtime
                         ),
                     )
@@ -128,7 +130,7 @@ class Engine:
                                     "verdict": report["verdict"],
                                     "issues": report["issues"],
                                 },
-                                "controller_reflection": {
+                                "meta_reflection": {
                                     "decision": reflection["decision"],
                                     "next_direction": reflection.get(
                                         "next_direction", ""
@@ -141,9 +143,9 @@ class Engine:
                         termination_reason = "validation_passed"
                         break
 
-                    # 总控决定提前收敛：结论可用或继续修正边际收益过低。
+                    # meta 决定提前收敛：结论可用或继续修正边际收益过低。
                     # fail 时不允许 stop——验证判定存在严重问题时，
-                    # 总控不得把失败提前定稿，必须继续修正轮
+                    # meta 不得把失败提前定稿，必须继续修正轮
                     if (
                         reflection["decision"] == "stop"
                         and report["verdict"] != "fail"

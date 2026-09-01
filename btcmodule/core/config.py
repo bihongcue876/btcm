@@ -16,6 +16,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from urllib.parse import urlparse
+
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from .task import RuntimeConfig
@@ -27,7 +29,13 @@ CONFIG_FILE = Path(__file__).resolve().parent.parent / "btcm.json"
 DEFAULT_WEB_SOURCES = ["wikipedia.org", "gov.cn", "edu.cn"]
 
 # 内置 Agent 必须齐全，配置加载与更新时强校验
-REQUIRED_AGENTS = ("creative", "validator", "controller")
+REQUIRED_AGENTS = ("creative", "validator", "controller", "meta")
+
+# 全局兜底模型：所有解析链最终回退目标
+DEFAULT_FALLBACK_MODEL = "gpt-3.5-turbo"
+
+# 结构化输出模式
+STRUCTURED_OUTPUT_MODES = ("text", "json_object")
 
 # 内置 MCP 预设：市面常见远程 MCP 服务器（Streamable HTTP），url 中 {api_key} 会被替换
 MCP_PRESETS: dict[str, dict] = {
@@ -53,16 +61,18 @@ MCP_PRESETS: dict[str, dict] = {
     },
 }
 
-# 各 Agent 的默认温度与最大输出 token（creative 0.8/2048，validator 0.3/2048，controller 0.3/1024）
+# 各 Agent 的默认温度与最大输出 token（creative 0.8/2048，validator 0.3/2048，controller 0.3/1024，meta 0.3/1024）
 AGENT_DEFAULT_TEMPERATURE = {
     "creative": 0.8,
     "validator": 0.3,
     "controller": 0.3,
+    "meta": 0.3,
 }
 AGENT_DEFAULT_MAX_TOKENS = {
     "creative": 2048,
     "validator": 2048,
     "controller": 1024,
+    "meta": 1024,
 }
 
 
@@ -77,6 +87,8 @@ class ProviderConfig(BaseModel):
     api_key: str | None = None
     models: list[str] = Field(default_factory=list)
     timeout: int = Field(default=120, ge=1, le=3600)
+    enabled: bool = True
+    options: dict = Field(default_factory=dict)
 
 
 class MCPServerConfig(BaseModel):
@@ -91,6 +103,7 @@ class MCPServerConfig(BaseModel):
     enabled: bool = True
     timeout: int = Field(default=60, ge=1, le=600)
     allowed_tools: list[str] = Field(default_factory=list)
+    allow_private: bool = False
 
     @model_validator(mode="after")
     def _check_target(self) -> "MCPServerConfig":
@@ -98,25 +111,90 @@ class MCPServerConfig(BaseModel):
             raise ValueError("MCP 服务器需要 url 或 preset 之一")
         if self.preset and self.preset not in MCP_PRESETS:
             raise ValueError(f"未知 MCP 预设：{self.preset}")
+        check_url = self.url if self.url else MCP_PRESETS.get(self.preset, {}).get("url", "")
+        if check_url:
+            _validate_mcp_url(check_url, self.allow_private)
         return self
 
 
-def resolve_mcp_url(srv: MCPServerConfig) -> str:
+def _mcp_effective_key(srv_name: str, srv: MCPServerConfig) -> str | None:
+    """MCP api_key：优先取环境变量 BTCM_MCP_<NAME>_API_KEY，其次配置文件。"""
+    env_key = _env_secret("MCP", f"{srv_name}_API_KEY")
+    return env_key if env_key is not None else srv.api_key
+
+
+def provider_api_key(cfg: BTCMConfig, provider_name: str) -> str | None:
+    """提供商 api_key：优先取环境变量 BTCM_PROVIDER_<NAME>_API_KEY，其次配置文件。"""
+    env_key = _env_secret("PROVIDER", f"{provider_name}_API_KEY")
+    if env_key is not None:
+        return env_key
+    provider = cfg.providers.get(provider_name)
+    return provider.api_key if provider else None
+
+
+_PRIVATE_HOSTS = {
+    "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0",
+}
+
+
+def _is_private_host(hostname: str) -> bool:
+    """判定主机名是否为私网/回环/链路本地地址。"""
+    if hostname.lower() in _PRIVATE_HOSTS:
+        return True
+    try:
+        parts = hostname.split(".")
+        if len(parts) == 4 and all(p.isdigit() for p in parts):
+            first = int(parts[0])
+            if first == 10:
+                return True
+            if first == 172 and 16 <= int(parts[1]) <= 31:
+                return True
+            if first == 192 and parts[1] == "168":
+                return True
+            if first == 169 and parts[1] == "254":
+                return True
+            if first == 127:
+                return True
+    except (ValueError, IndexError):
+        pass
+    if hostname.lower().startswith("fc") or hostname.lower().startswith("fd"):
+        return True
+    if hostname.lower().startswith("fe80"):
+        return True
+    return False
+
+
+def _validate_mcp_url(url: str, allow_private: bool) -> None:
+    """校验 MCP URL：仅允许 http/https，私网地址默认拒绝。"""
+    u = urlparse(url)
+    if u.scheme not in ("http", "https"):
+        raise ValueError(f"MCP URL scheme 仅允许 http/https，收到：{u.scheme}")
+    if not allow_private and _is_private_host(u.hostname or ""):
+        raise ValueError(
+            f"MCP URL 指向私网地址（{u.hostname}），"
+            "如需放行请设置 allow_private=true"
+        )
+
+
+def resolve_mcp_url(srv_name: str, srv: MCPServerConfig) -> str:
     """解析 MCP 服务器实际 URL；预设需要 api_key 而未提供时报错。"""
     if srv.url:
         return srv.url
     assert srv.preset is not None  # 模型校验已保证 url/preset 至少其一
     preset = MCP_PRESETS[srv.preset]
-    if preset["needs_key"] and not srv.api_key:
+    api_key = _mcp_effective_key(srv_name, srv)
+    if preset["needs_key"] and not api_key:
         raise ConfigError(f"MCP 预设 '{srv.preset}' 需要 api_key")
-    return preset["url"].format(api_key=srv.api_key or "")
+    url = preset["url"].format(api_key=api_key or "")
+    _validate_mcp_url(url, srv.allow_private)
+    return url
 
 
 class AgentConfig(BaseModel):
-    """Agent 路由与运行参数。"""
+    """Agent 路由与运行参数。provider/model 为空时跟随全局默认。"""
 
-    provider: str
-    model: str
+    provider: str | None = None
+    model: str | None = None
     num_candidates: int = Field(default=3, ge=1, le=10)
     temperature: float = Field(default=0.3, ge=0, le=2)
     max_tokens: int = Field(default=2048, ge=256, le=32768)
@@ -135,6 +213,10 @@ class BTCMConfig(BaseModel):
     enable_creative: bool = True
     enable_validator: bool = True
     admin_token: str | None = None
+    lock_invoke: bool = False
+    default_provider: str | None = None
+    default_model: str | None = None
+    structured_output: str = Field(default="text")
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
@@ -160,6 +242,9 @@ def build_default_config() -> BTCMConfig:
         timeout=300,
         enable_creative=True,
         enable_validator=True,
+        default_provider="deepseek",
+        default_model="deepseek-chat",
+        structured_output="text",
         providers={
             "deepseek": ProviderConfig(
                 base_url="https://api.deepseek.com/v1",
@@ -172,7 +257,7 @@ def build_default_config() -> BTCMConfig:
                 timeout=600,
             ),
         },
-        agents={name: agent(name) for name in ("creative", "validator", "controller")},
+        agents={name: agent(name) for name in ("creative", "validator", "controller", "meta")},
     )
 
 
@@ -248,7 +333,9 @@ class ConfigManager:
 
     @staticmethod
     def _check_agents(cfg: BTCMConfig) -> None:
-        """强校验三个内置 Agent 定义齐全，且 mcp_servers 引用有效。"""
+        """强校验三个内置 Agent 定义齐全，且 mcp_servers 引用有效。
+        显式 provider 必须存在且启用；跟随全局默认时不校验。
+        """
         missing = [name for name in REQUIRED_AGENTS if name not in cfg.agents]
         if missing:
             raise ConfigError(
@@ -263,15 +350,32 @@ class ConfigManager:
                     f"Agent '{agent_name}' 引用了未注册的 MCP 服务器："
                     f"{', '.join(unknown)}"
                 )
+            if agent_cfg.provider:
+                if agent_cfg.provider not in cfg.providers:
+                    raise ConfigError(
+                        f"Agent '{agent_name}' 引用的提供商不存在：{agent_cfg.provider}"
+                    )
+                if not cfg.providers[agent_cfg.provider].enabled:
+                    raise ConfigError(
+                        f"Agent '{agent_name}' 引用的提供商已停用：{agent_cfg.provider}"
+                    )
 
     def as_public_dict(self) -> dict:
-        """对外可读配置：排除所有 provider / mcp 服务器的 api_key 与 admin_token。"""
+        """对外可读配置：不输出任何密钥内容，仅回显是否已设置的布尔。"""
         data = self._config.model_dump()
-        for provider in data.get("providers", {}).values():
+        for name, provider in data.get("providers", {}).items():
             provider.pop("api_key", None)
-        for server in data.get("mcp_servers", {}).values():
+            provider["api_key_set"] = provider_api_key(self._config, name) is not None
+        for name, server in data.get("mcp_servers", {}).items():
             server.pop("api_key", None)
+            server["api_key_set"] = (
+                _mcp_effective_key(name, self._config.mcp_servers[name]) is not None
+            )
+        admin_set = bool(
+            os.environ.get("BTCM_ADMIN_TOKEN") or self._config.admin_token
+        )
         data.pop("admin_token", None)
+        data["admin_token_set"] = admin_set
         return data
 
     # ---------- 更新 ----------
@@ -342,20 +446,85 @@ def resolve_agent_params(
 
     # timeout 兜底：Agent 级与请求级均未设置时，使用所属提供商的 timeout（默认 120）
     if effective.get("timeout") is None:
-        provider_cfg = cfg.providers.get(agent_cfg.provider)
+        provider_name = resolve_provider_name(cfg, agent_name)
+        provider_cfg = cfg.providers.get(provider_name)
         effective["timeout"] = provider_cfg.timeout if provider_cfg else 120
 
     return effective
 
 
+def _env_secret(prefix: str, name: str) -> str | None:
+    """从环境变量读取密钥，BTCM_<prefix>_<NAME>，NAME 中非字母数字转 _。"""
+    key = f"BTCM_{prefix}_{''.join(c if c.isalnum() else '_' for c in name.upper())}"
+    return os.environ.get(key)
+
+
 def resolve_agent_route(cfg: BTCMConfig, agent_name: str) -> tuple[str, str | None, str]:
-    """返回某 Agent 路由的 (base_url, api_key, model)，供模型网关使用。"""
+    """返回某 Agent 路由的 (base_url, api_key, model)，供模型网关使用。
+
+    模型解析链（优先级从高到低）：
+    agent.model → 全局 default_model（须在 provider.models 内）→ provider.models[0] → 全局兜底。
+    provider 解析链：agent.provider → default_provider → 首个 enabled provider → 报错。
+    api_key 优先取环境变量 BTCM_PROVIDER_<NAME>_API_KEY，其次配置文件。
+    """
     agent_cfg = cfg.agents.get(agent_name)
     if agent_cfg is None:
         raise ConfigError(f"配置缺少 Agent 定义：{agent_name}")
-    provider_cfg = cfg.providers.get(agent_cfg.provider)
-    if provider_cfg is None:
-        raise ConfigError(
-            f"Agent '{agent_name}' 引用的提供商不存在：{agent_cfg.provider}"
-        )
-    return provider_cfg.base_url, provider_cfg.api_key, agent_cfg.model
+
+    provider_name = resolve_provider_name(cfg, agent_name)
+    provider_cfg = cfg.providers[provider_name]
+
+    model = _resolve_model(cfg, agent_cfg, provider_cfg)
+
+    api_key = provider_api_key(cfg, provider_name)
+    return provider_cfg.base_url, api_key, model
+
+
+def resolve_provider_name(cfg: BTCMConfig, agent_name: str) -> str:
+    """返回某 Agent 实际使用的 provider 名（经解析链）。"""
+    agent_cfg = cfg.agents.get(agent_name)
+    if agent_cfg is None:
+        raise ConfigError(f"配置缺少 Agent 定义：{agent_name}")
+    return _resolve_provider(cfg, agent_cfg, agent_name)
+
+
+def _resolve_provider(cfg: BTCMConfig, agent_cfg: AgentConfig, agent_name: str) -> str:
+    """解析 agent 实际使用的 provider 名。"""
+    if agent_cfg.provider:
+        if agent_cfg.provider not in cfg.providers:
+            raise ConfigError(
+                f"Agent '{agent_name}' 引用的提供商不存在：{agent_cfg.provider}"
+            )
+        if not cfg.providers[agent_cfg.provider].enabled:
+            raise ConfigError(
+                f"Agent '{agent_name}' 引用的提供商已停用：{agent_cfg.provider}"
+            )
+        return agent_cfg.provider
+    if cfg.default_provider:
+        if cfg.default_provider not in cfg.providers:
+            raise ConfigError(
+                f"全局默认提供商不存在：{cfg.default_provider}"
+            )
+        if not cfg.providers[cfg.default_provider].enabled:
+            raise ConfigError(
+                f"全局默认提供商已停用：{cfg.default_provider}"
+            )
+        return cfg.default_provider
+    # 回退：首个 enabled provider
+    for name, p in cfg.providers.items():
+        if p.enabled:
+            return name
+    raise ConfigError(
+        f"Agent '{agent_name}' 无法解析提供商：无可用（已启用）的提供商"
+    )
+
+
+def _resolve_model(cfg: BTCMConfig, agent_cfg: AgentConfig, provider_cfg: ProviderConfig) -> str:
+    """解析 agent 实际使用的 model 名。"""
+    if agent_cfg.model:
+        return agent_cfg.model
+    if cfg.default_model and cfg.default_model in provider_cfg.models:
+        return cfg.default_model
+    if provider_cfg.models:
+        return provider_cfg.models[0]
+    return DEFAULT_FALLBACK_MODEL

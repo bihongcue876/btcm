@@ -188,7 +188,7 @@ class MCPManager:
         if name in self._tools:
             return self._tools[name]
         try:
-            url = resolve_mcp_url(srv)
+            url = resolve_mcp_url(name, srv)
             conn = MCPServerConnection(name, url, srv.timeout)
             async with httpx.AsyncClient() as client:
                 await conn.initialize(client)

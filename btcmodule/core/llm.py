@@ -19,7 +19,13 @@ from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
-from .config import ConfigManager, resolve_agent_params, resolve_agent_route
+from .config import (
+    ConfigManager,
+    provider_api_key,
+    resolve_agent_params,
+    resolve_agent_route,
+    resolve_provider_name,
+)
 from .mcp import TOOL_OUTPUT_LIMIT
 from .task import RuntimeConfig
 
@@ -65,6 +71,41 @@ class ModelGateway:
         self._cm = cm
         self._clients: dict[tuple[str, str], AsyncOpenAI] = {}
 
+    async def list_models(self, provider_name: str) -> list[str]:
+        """拉取提供商的可用模型列表（OpenAI 兼容 GET /models），供控制面板配置。
+
+        走与调用一致的密钥解析（环境变量优先）与客户端缓存；
+        超时取提供商 timeout。
+        """
+        cfg = self._cm.config
+        provider = cfg.providers.get(provider_name)
+        if provider is None:
+            raise LLMError("llm_error", f"提供商 '{provider_name}' 不存在")
+
+        api_key = provider_api_key(cfg, provider_name)
+        host = (urlparse(provider.base_url).hostname or "").lower()
+        if not api_key and host not in _LOCAL_HOSTS:
+            raise LLMError(
+                "llm_error",
+                f"提供商 '{provider_name}' 未配置 api_key，无法拉取模型列表",
+            )
+
+        client = self._client(provider.base_url, api_key)
+        try:
+            resp = await asyncio.wait_for(
+                client.models.list(), timeout=provider.timeout
+            )
+        except asyncio.TimeoutError as e:
+            raise LLMError(
+                "llm_timeout",
+                f"提供商 '{provider_name}' 拉取模型列表超时（{provider.timeout}s）",
+            ) from e
+        except Exception as e:
+            raise LLMError(
+                "llm_error", f"提供商 '{provider_name}' 拉取模型列表失败：{e}"
+            ) from e
+        return sorted({m.id for m in resp.data if getattr(m, "id", None)})
+
     def _client(self, base_url: str, api_key: str | None) -> AsyncOpenAI:
         key = (base_url, api_key or "")
         if key not in self._clients:
@@ -84,6 +125,8 @@ class ModelGateway:
         params: dict,
         messages: list[dict],
         tools: list[dict] | None = None,
+        provider_options: dict | None = None,
+        structured_output: str = "text",
     ):
         client = self._client(base_url, api_key)
 
@@ -104,6 +147,10 @@ class ModelGateway:
         }
         if tools:
             request_kwargs["tools"] = tools
+        if structured_output == "json_object":
+            request_kwargs["response_format"] = {"type": "json_object"}
+        if provider_options:
+            request_kwargs.update(provider_options)
 
         try:
             start = time.monotonic()
@@ -150,9 +197,18 @@ class ModelGateway:
         cfg = self._cm.config
         base_url, api_key, model = resolve_agent_route(cfg, agent_name)
         params = resolve_agent_params(cfg, runtime, agent_name)
+        provider_name = resolve_provider_name(cfg, agent_name)
+        provider_cfg = cfg.providers.get(provider_name)
 
         resp = await self._complete(
-            agent_name, base_url, api_key, model, params, messages
+            agent_name,
+            base_url,
+            api_key,
+            model,
+            params,
+            messages,
+            provider_options=provider_cfg.options if provider_cfg else None,
+            structured_output=cfg.structured_output,
         )
         content = self._content(resp)
         if not content:
@@ -176,11 +232,21 @@ class ModelGateway:
         cfg = self._cm.config
         base_url, api_key, model = resolve_agent_route(cfg, agent_name)
         params = resolve_agent_params(cfg, runtime, agent_name)
+        provider_name = resolve_provider_name(cfg, agent_name)
+        provider_cfg = cfg.providers.get(provider_name)
 
         convo = list(messages)
         for _ in range(self.MAX_TOOL_ROUNDS):
             resp = await self._complete(
-                agent_name, base_url, api_key, model, params, convo, tools=tools
+                agent_name,
+                base_url,
+                api_key,
+                model,
+                params,
+                convo,
+                tools=tools,
+                provider_options=provider_cfg.options if provider_cfg else None,
+                structured_output=cfg.structured_output,
             )
             message = resp.choices[0].message
             tool_calls = getattr(message, "tool_calls", None)
@@ -219,7 +285,14 @@ class ModelGateway:
 
         # 工具轮次用尽：不带 tools 强制产出最终 JSON
         resp = await self._complete(
-            agent_name, base_url, api_key, model, params, convo
+            agent_name,
+            base_url,
+            api_key,
+            model,
+            params,
+            convo,
+            provider_options=provider_cfg.options if provider_cfg else None,
+            structured_output=cfg.structured_output,
         )
         content = self._content(resp)
         if not content:
