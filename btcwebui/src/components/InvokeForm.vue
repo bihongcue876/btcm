@@ -43,7 +43,8 @@ async function handleSubmit() {
     enable_creative: props.creative,
     enable_validator: props.validator,
   }
-  if (form.candidate.trim()) payload.candidate = form.candidate.trim()
+  // 完整循环/纯验证下候选为可选输入（完整循环作为首轮候选）；纯创意不发送
+  if (props.validator && form.candidate.trim()) payload.candidate = form.candidate.trim()
   if (form.context_summary.trim()) payload.context_summary = form.context_summary.trim()
   if (evidence.length) payload.evidence = evidence
   if (form.max_iterations != null || form.timeout != null) {
@@ -52,6 +53,13 @@ async function handleSubmit() {
     if (form.timeout != null) payload.config.timeout = form.timeout
   }
   emit('submit', payload)
+}
+
+function onQueryKeydown(e: KeyboardEvent) {
+  if (e.ctrlKey && e.key === 'Enter') {
+    e.preventDefault()
+    handleSubmit()
+  }
 }
 
 defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
@@ -66,10 +74,12 @@ defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
           type="textarea"
           :rows="2"
           placeholder="例如：下周去东京，预算 5000，能去哪些地方？"
+          @keydown="onQueryKeydown"
         />
       </n-form-item>
 
       <n-form-item
+        v-if="props.validator"
         label="候选内容"
         :required="!props.creative && props.validator"
       >
@@ -77,7 +87,11 @@ defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
           v-model:value="form.candidate"
           type="textarea"
           :rows="2"
-          placeholder="待验证/待改进的候选内容（纯验证必填）"
+          :placeholder="
+            props.creative
+              ? '可选：作为首轮候选进入循环，留空则由创意 Agent 发散生成'
+              : '待验证/待改进的候选内容（纯验证必填）'
+          "
         />
       </n-form-item>
 
@@ -127,6 +141,7 @@ defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
         <n-button type="primary" size="large" :loading="submitting" @click="handleSubmit">
           发起调用
         </n-button>
+        <span class="submit-hint">Ctrl+Enter 快速提交</span>
       </n-form-item>
     </n-form>
   </n-card>
@@ -137,5 +152,10 @@ defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
   display: flex;
   gap: 12px;
   margin-bottom: 8px;
+}
+.submit-hint {
+  margin-left: 12px;
+  font-size: 12px;
+  color: #6b7280;
 }
 </style>

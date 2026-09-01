@@ -1,16 +1,15 @@
 <script setup lang="ts">
 import type { HybridIntermediateEntry, LongChainIntermediateEntry } from '@/types'
+import { verdictLabel, verdictTagType } from '@/labels'
 
 defineProps<{
   entries: (HybridIntermediateEntry | LongChainIntermediateEntry)[]
   type: 'hybrid' | 'longchain'
 }>()
 
-function verdictType(v: string | undefined) {
-  if (v === 'pass') return 'success'
-  if (v === 'conditional_pass') return 'warning'
-  if (v === 'fail') return 'error'
-  return 'default'
+const DECISION_LABELS: Record<string, string> = {
+  continue: '继续',
+  stop: '收敛',
 }
 </script>
 
@@ -38,10 +37,10 @@ function verdictType(v: string | undefined) {
             验证判定
             <n-tag
               size="small"
-              :type="verdictType(entry.validator_output.verdict)"
+              :type="verdictTagType(entry.validator_output.verdict)"
               class="ml-1"
             >
-              {{ entry.validator_output.verdict }}
+              {{ verdictLabel(entry.validator_output.verdict) }}
             </n-tag>
           </div>
           <ul class="list" v-if="entry.validator_output.issues?.length">
@@ -50,13 +49,20 @@ function verdictType(v: string | undefined) {
             </li>
           </ul>
         </div>
-        <div class="block" v-if="entry.controller_reflection?.decision">
+        <div class="block" v-if="entry.meta_reflection?.decision">
           <div class="label">
-            总控决策
-            <n-tag size="small" type="info" class="ml-1">
-              {{ entry.controller_reflection.decision }}
+            meta 决策
+            <n-tag
+              size="small"
+              :type="entry.meta_reflection.decision === 'stop' ? 'success' : 'info'"
+              class="ml-1"
+            >
+              {{ DECISION_LABELS[entry.meta_reflection.decision] ?? entry.meta_reflection.decision }}
             </n-tag>
           </div>
+          <p v-if="entry.meta_reflection.next_direction" class="thought">
+            下轮方向：{{ entry.meta_reflection.next_direction }}
+          </p>
         </div>
       </template>
       <template v-else-if="type === 'longchain' && 'thought' in entry">

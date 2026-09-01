@@ -54,7 +54,7 @@ function select(s: ShapeMeta) {
       <span class="shape-desc">{{ s.desc }}</span>
     </button>
   </div>
-  <p class="shape-hint">总控恒启用 · 双关为长链持续思考</p>
+  <p class="shape-hint">总控（controller / meta）恒启用 · 双关 = 长链持续思考形态</p>
 </template>
 
 <style scoped>

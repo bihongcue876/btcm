@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import { api, ApiError } from '@/api/client'
 import type { ApiError as ApiErrorType, InvokeData, InvokePayload } from '@/types'
@@ -15,7 +15,10 @@ const result = ref<InvokeData | null>(null)
 const error = ref<ApiErrorType | null>(null)
 const loading = ref(false)
 const durationMs = ref<number>()
+const requestId = ref('')
+const elapsedMs = ref(0)
 const invokeForm = ref<InstanceType<typeof InvokeForm> | null>(null)
+let elapsedTimer: ReturnType<typeof setInterval> | undefined
 
 async function syncSwitchesFromGlobal() {
   try {
@@ -31,10 +34,16 @@ async function handleSubmit(payload: InvokePayload) {
   loading.value = true
   error.value = null
   result.value = null
+  requestId.value = ''
   invokeForm.value?.setSubmitting(true)
   const started = performance.now()
+  elapsedMs.value = 0
+  elapsedTimer = setInterval(() => {
+    elapsedMs.value = Math.round(performance.now() - started)
+  }, 1000)
   try {
-    const data = await api.invoke(payload)
+    const { data, requestId: rid } = await api.invoke(payload)
+    requestId.value = rid
     durationMs.value = Math.round(performance.now() - started)
     result.value = data
   } catch (e) {
@@ -44,12 +53,14 @@ async function handleSubmit(payload: InvokePayload) {
       error.value = { code: 'UNKNOWN', message: String(e) }
     }
   } finally {
+    clearInterval(elapsedTimer)
     loading.value = false
     invokeForm.value?.setSubmitting(false)
   }
 }
 
 onMounted(syncSwitchesFromGlobal)
+onUnmounted(() => clearInterval(elapsedTimer))
 </script>
 
 <template>
@@ -78,6 +89,8 @@ onMounted(syncSwitchesFromGlobal)
           :error="error"
           :loading="loading"
           :duration-ms="durationMs"
+          :elapsed-ms="elapsedMs"
+          :request-id="requestId"
         />
       </n-grid-item>
     </n-grid>

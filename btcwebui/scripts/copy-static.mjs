@@ -5,7 +5,7 @@ import path from 'node:path'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const buildDir = path.resolve(here, '../build')
-const staticDir = path.resolve(here, '../btcmodule/static')
+const staticDir = path.resolve(here, '../../btcmodule/static')
 
 if (!existsSync(buildDir)) {
   console.error('[copy-static] 未找到构建产物，请先执行 pnpm build')

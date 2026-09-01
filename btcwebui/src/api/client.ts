@@ -2,6 +2,7 @@ import axios, { type AxiosInstance, type AxiosResponse } from 'axios'
 import type {
   ApiResponse,
   GlobalConfig,
+  HealthData,
   InvokeData,
   InvokePayload,
   LogsData,
@@ -26,6 +27,9 @@ const http: AxiosInstance = axios.create({
 
 const ADMIN_TOKEN_KEY = 'btcm_admin_token'
 
+/** 令牌变更后广播，各页面监听并重新拉取（解决设令牌后各页 401 的死锁） */
+export const ADMIN_TOKEN_CHANGED_EVENT = 'btcm:admin-token-changed'
+
 export function getAdminToken(): string {
   return localStorage.getItem(ADMIN_TOKEN_KEY) ?? ''
 }
@@ -47,8 +51,8 @@ http.interceptors.request.use((config) => {
   return config
 })
 
-/** 统一解包 {success, data, error} 外层结构 */
-async function unwrap<T>(promise: Promise<AxiosResponse<ApiResponse<T>>>): Promise<T> {
+/** 统一解包 {success, data, error} 外层结构，成功时返回完整 body（含 request_id） */
+async function unwrapBody<T>(promise: Promise<AxiosResponse<ApiResponse<T>>>): Promise<ApiResponse<T>> {
   let resp: AxiosResponse<ApiResponse<T>>
   try {
     resp = await promise
@@ -65,12 +69,21 @@ async function unwrap<T>(promise: Promise<AxiosResponse<ApiResponse<T>>>): Promi
   if (!body.success || body.error) {
     throw new ApiError(body.error?.code ?? 'UNKNOWN', body.error?.message ?? '未知错误')
   }
+  return body
+}
+
+async function unwrap<T>(promise: Promise<AxiosResponse<ApiResponse<T>>>): Promise<T> {
+  const body = await unwrapBody(promise)
   return body.data as T
 }
 
 export const api = {
-  invoke(payload: InvokePayload): Promise<InvokeData> {
-    return unwrap<InvokeData>(http.post('/invoke', payload))
+  async invoke(payload: InvokePayload): Promise<{ data: InvokeData; requestId: string }> {
+    const body = await unwrapBody<InvokeData>(http.post('/invoke', payload))
+    return { data: body.data as InvokeData, requestId: body.request_id }
+  },
+  getHealth(): Promise<HealthData> {
+    return unwrap<HealthData>(http.get('/health'))
   },
   getConfig(): Promise<GlobalConfig> {
     return unwrap<GlobalConfig>(http.get('/config'))
@@ -83,6 +96,12 @@ export const api = {
   },
   getLogs(limit: number, offset: number): Promise<LogsData> {
     return unwrap<LogsData>(http.get('/logs', { params: { limit, offset } }))
+  },
+  /** 拉取提供商可用模型列表（OpenAI 兼容 GET /models 的服务端代理） */
+  fetchProviderModels(name: string): Promise<string[]> {
+    return unwrap<{ models: string[] }>(
+      http.get(`/providers/${encodeURIComponent(name)}/models`),
+    ).then((d) => d.models)
   },
 }
 

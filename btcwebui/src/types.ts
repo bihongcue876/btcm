@@ -5,6 +5,10 @@ export interface ProviderConfig {
   api_key?: string | null
   models: string[]
   timeout?: number
+  enabled?: boolean
+  options?: Record<string, unknown>
+  /** 只读：服务端是否已设置密钥（含环境变量注入），GET 回显 */
+  api_key_set?: boolean
 }
 
 export interface MCPServerConfig {
@@ -14,11 +18,14 @@ export interface MCPServerConfig {
   enabled?: boolean
   timeout?: number
   allowed_tools?: string[]
+  allow_private?: boolean
+  /** 只读：服务端是否已设置密钥（含环境变量注入），GET 回显 */
+  api_key_set?: boolean
 }
 
 export interface AgentConfig {
-  provider: string
-  model: string
+  provider?: string | null
+  model?: string | null
   num_candidates?: number
   temperature?: number
   max_tokens?: number
@@ -35,6 +42,12 @@ export interface GlobalConfig {
   enable_creative: boolean
   enable_validator: boolean
   admin_token?: string | null
+  /** 只读：服务端是否已设置管理令牌（含环境变量注入），GET 回显 */
+  admin_token_set?: boolean
+  lock_invoke?: boolean
+  default_provider?: string | null
+  default_model?: string | null
+  structured_output?: string
   providers: Record<string, ProviderConfig>
   mcp_servers: Record<string, MCPServerConfig>
   agents: Record<string, AgentConfig>
@@ -83,6 +96,13 @@ export interface ApiResponse<T = unknown> {
 
 // ---------- invoke 响应 data（按形态分化） ----------
 
+export interface Usage {
+  prompt_tokens: number
+  completion_tokens: number
+  llm_calls: number
+  tool_calls: number
+}
+
 export interface ValidatorOutput {
   verdict: 'pass' | 'conditional_pass' | 'fail'
   issues: string[]
@@ -92,7 +112,7 @@ export interface HybridIntermediateEntry {
   iteration: number
   creative_output?: string[]
   validator_output?: ValidatorOutput
-  controller_reflection?: { decision?: string; next_direction?: string }
+  meta_reflection?: { decision?: string; next_direction?: string }
 }
 
 export interface LongChainIntermediateEntry {
@@ -109,6 +129,7 @@ export interface ValidationData {
   iterations_used: number
   termination_reason: string
   intermediate_log?: HybridIntermediateEntry[]
+  usage?: Usage
 }
 
 export interface CreativeData {
@@ -116,6 +137,7 @@ export interface CreativeData {
   conclusion: string
   iterations_used: number
   termination_reason: string
+  usage?: Usage
 }
 
 export interface LongChainData {
@@ -123,6 +145,7 @@ export interface LongChainData {
   iterations_used: number
   termination_reason: string
   intermediate_log?: LongChainIntermediateEntry[]
+  usage?: Usage
 }
 
 export type InvokeData = ValidationData | CreativeData | LongChainData
@@ -141,9 +164,18 @@ export interface LogItem {
   user_query: string
   conclusion?: string | null
   error?: string | null
+  usage?: Usage | null
 }
 
 export interface LogsData {
   total: number
   items: LogItem[]
+}
+
+// ---------- health ----------
+
+export interface HealthData {
+  status: string
+  version: string
+  uptime_s: number
 }
