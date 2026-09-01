@@ -1,15 +1,16 @@
-﻿"""REST API 路由：/api/invoke、/api/config、/api/logs、/api/health。
+﻿"""REST API 路由：/api/invoke、/api/config、/api/logs、/api/health、/api/providers。
 
 统一外层结构 {success, data, error, request_id}，见协议第 1.3 节。
 配置 admin_token 后，PUT /api/config、POST /api/config/reset、GET /api/logs
-要求 X-Admin-Token 请求头；/api/invoke、GET /api/config 与 /api/health
-保持开放（响应不含任何密钥）。
+与 GET /api/providers/{name}/models 要求 X-Admin-Token 请求头；
+/api/invoke、GET /api/config 与 /api/health 保持开放（响应不含任何密钥）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 import time
 import uuid
@@ -19,7 +20,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from ..core.config import ConfigError
-from ..core.llm import usage_var
+from ..core.llm import LLMError, usage_var
 from ..core.result import BTCMError, ErrorInfo, fail, ok
 from ..core.task import InvokeRequest, Task
 
@@ -45,9 +46,11 @@ def _now() -> str:
 
 
 def _denied(request: Request) -> JSONResponse | None:
-    """admin_token 已设置时校验 X-Admin-Token；未通过返回 401 响应。"""
+    """admin_token 已设置时校验 X-Admin-Token；未通过返回 401 响应。
+    token 优先取环境变量 BTCM_ADMIN_TOKEN，其次配置文件。
+    """
     cm = request.app.state.config_manager
-    token = cm.config.admin_token
+    token = os.environ.get("BTCM_ADMIN_TOKEN") or cm.config.admin_token
     if not token:
         return None
     provided = request.headers.get("x-admin-token", "")
@@ -77,6 +80,12 @@ async def invoke(body: InvokeRequest, request: Request) -> JSONResponse:
         default_enable_creative=cm.config.enable_creative,
         default_enable_validator=cm.config.enable_validator,
     )
+
+    # lock_invoke 开启时 invoke 也需 X-Admin-Token
+    if cm.config.lock_invoke:
+        denied = _denied(request)
+        if denied is not None:
+            return denied
 
     # 纯验证形态下 candidate 必填
     if not task.enable_creative and task.enable_validator and not task.candidate:
@@ -295,6 +304,40 @@ async def get_logs(
     return JSONResponse(
         content=ok({"total": total, "items": items}, _rid()).model_dump()
     )
+
+
+@router.get("/providers/{name}/models")
+async def provider_models(name: str, request: Request) -> JSONResponse:
+    """拉取提供商可用模型列表（OpenAI 兼容 GET /models 的代理）。
+
+    供控制面板 BYOK 配置：填充 providers.<name>.models。会触发一次
+    对外请求，故与写配置同级保护（admin_token 设置时需 X-Admin-Token）。
+    """
+    denied = _denied(request)
+    if denied is not None:
+        return denied
+    cm = request.app.state.config_manager
+    gateway = request.app.state.gateway
+    rid = _rid()
+    if name not in cm.config.providers:
+        return JSONResponse(
+            status_code=404,
+            content=fail(
+                ErrorInfo(code="NOT_FOUND", message=f"提供商 '{name}' 不存在"),
+                rid,
+            ).model_dump(),
+        )
+    try:
+        models = await gateway.list_models(name)
+    except LLMError as e:
+        return JSONResponse(
+            status_code=502,
+            content=fail(
+                ErrorInfo(code="PROVIDER_ERROR", message=e.message), rid
+            ).model_dump(),
+        )
+    logger.info("拉取模型列表 provider=%s 数量=%d", name, len(models))
+    return JSONResponse(content=ok({"models": models}, rid).model_dump())
 
 
 @router.get("/health")
