@@ -23,3 +23,5 @@ btcwebui/node_modules/
 .workbuddy
 .opencode
 AGENTS.md
+# AI 生成图原始产物（裁剪后的可用版本在 btcwebui/public/）
+vibe_images/
