@@ -119,7 +119,24 @@ onUnmounted(() => clearInterval(healthTimer))
         <n-layout position="absolute" class="app-root">
           <n-layout-header bordered class="header">
             <div class="brand">
-              <span class="brand-mark">◆</span>
+              <span class="brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 64 64" width="20" height="20">
+                  <defs>
+                    <linearGradient id="bm-g" x1="0" y1="1" x2="1" y2="0">
+                      <stop offset="0" stop-color="#6D7CFF" />
+                      <stop offset="1" stop-color="#38BDF8" />
+                    </linearGradient>
+                  </defs>
+                  <rect width="64" height="64" rx="13" fill="#101014" />
+                  <path
+                    d="M32 13 L51.5 46.5 L12.5 46.5 Z"
+                    fill="url(#bm-g)"
+                    stroke="url(#bm-g)"
+                    stroke-width="4.5"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </span>
               <span>
                 <span class="brand-title">BTCM</span>
                 <span class="brand-sub">副思考链模块 · 控制面板</span>
@@ -240,9 +257,10 @@ body {
   gap: 10px;
 }
 .brand-mark {
-  color: #8794ff;
-  font-size: 18px;
-  text-shadow: 0 0 12px rgba(109, 124, 255, 0.7);
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+  filter: drop-shadow(0 0 6px rgba(109, 124, 255, 0.55));
 }
 .brand-title {
   font-weight: 500;
