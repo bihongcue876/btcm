@@ -326,7 +326,7 @@
 - `enable_creative` / `enable_validator` 为 Agent 启用开关的全局默认值，请求体顶层字段可对当次调用覆盖；总控类 Agent（controller / meta）恒启用，无开关。
 - `providers` 为 OpenAI 兼容提供商注册表，各 Agent 通过 `provider` + `model` 指向其一，可分别使用不同提供商与模型。
 - `mcp_servers` 为 MCP 服务器注册表（验证 Agent 联网工具），条目字段：`preset`（内置预设名，可选）或 `url`（直接给出 Streamable HTTP 端点）、`api_key`（预设需要密钥时填写）、`enabled`（默认 true）、`timeout`（单请求超时秒数，默认 60）、`allowed_tools`（工具白名单，留空 = 全部）、`allow_private`（默认 false，指向内网/回环地址时需显式放行）。Agent 经 `agents.validator.mcp_servers` 引用条目名。
-- 提供商字段：`base_url`（必填）、`models`（该提供商可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 120）。本地推理服务（Ollama、llama.cpp、LM Studio 等）同样经 OpenAI 兼容接口接入，推理较慢，建议按需放宽 `timeout`（如 600）；本地服务无需鉴权，`api_key` 可省略或填任意占位值。
+- 提供商字段：`base_url`（必填，仅接受 `http` / `https` scheme 且必须含主机名，如 `https://api.deepseek.com/v1`、`http://localhost:11434/v1`；`ftp://` 或缺 scheme 等无效地址返回 400 `CONFIG_VALIDATION_ERROR`。本地地址合法，不受 MCP 那套私网限制）、`models`（该提供商可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 120）。本地推理服务（Ollama、llama.cpp、LM Studio 等）同样经 OpenAI 兼容接口接入，推理较慢，建议按需放宽 `timeout`（如 600）；本地服务无需鉴权，`api_key` 可省略或填任意占位值。
 - `providers.<name>.api_key`、`mcp_servers.<name>.api_key` 与 `admin_token` 仅在 `PUT /api/config` 时写入，`GET /api/config` 不回显这些字段；但回显只读布尔：`providers.<name>.api_key_set`、`mcp_servers.<name>.api_key_set` 与顶层 `admin_token_set`（环境变量注入的密钥亦计为已设置），供控制面板展示 BYOK 配置状态。
 
 ---
@@ -358,6 +358,8 @@
 ```
 
 只需提供需要更新的字段，未提供的字段保持不变。提供商与 Agent 路由可整体或局部更新；`providers.<name>` 与 `mcp_servers.<name>` 的部分更新按字段合并。
+
+**删除语义（JSON Merge Patch / RFC 7386）**：值为 `null` 的键表示删除该键。移除注册表条目必须显式发送 `null`——如 `{"providers": {"old-name": null}}`、`{"mcp_servers": {"old-name": null}}`；**仅在 payload 中省略该条目不会删除它**（深合并会保留旧值）。同一规则下 `{"admin_token": null}` 清除令牌，`{"agents": {"creative": {"provider": null, "model": null}}}` 让该 Agent 回退为跟随全局默认。删除后仍执行整体校验：若仍有 Agent 引用被删的提供商，返回 400 `CONFIG_VALIDATION_ERROR`。
 
 **鉴权**：配置 `admin_token` 后，`PUT /api/config`、`POST /api/config/reset` 与 `GET /api/logs` 要求请求头 `X-Admin-Token` 携带该令牌，缺失或错误返回 401 `UNAUTHORIZED`；`POST /api/invoke` 与 `GET /api/config` 恒为开放端点（响应不含任何密钥）。`admin_token` 本身仅可写入、不回显，丢失后只能直接编辑 `btcm.json` 或经 `POST /api/config/reset` 重置（重置同样需要令牌）。
 
@@ -523,6 +525,7 @@
 
 ## 6. 变更记录
 
+- alpha-5（2026-09-02，内部迭代）：`PUT /api/config` 深度合并改为遵循 JSON Merge Patch（RFC 7386）语义——值为 `null` 的键表示删除，修复注册表条目无法删除的缺陷（此前仅在 payload 中省略 `providers.<name>` / `mcp_servers.<name>` 会被旧配置深合并复活，控制面板删除后服务端仍保留）；`providers.<name>.base_url` 新增 scheme 校验（仅 `http` / `https` 且必须含主机名，此前 `ftp://`、缺 scheme 等无效地址被静默接受，直到实际调用才报错）；控制面板新增提供商时前置校验 `base_url`、未保存条目显示「未保存」标记，对未保存提供商点击「拉取模型」改为引导「保存并拉取」，不再直接返回 404「提供商不存在」。
 - alpha-4（2026-08-31，内部迭代）：`GET /api/config` 回显只读布尔 `providers.<name>.api_key_set` / `mcp_servers.<name>.api_key_set` / 顶层 `admin_token_set`（不回显密钥内容，环境变量注入亦计入）；新增 `GET /api/providers/{name}/models` 模型发现端点（代理 OpenAI 兼容 `GET /models`，填充 `providers.<name>.models`；admin_token 设置时需 `X-Admin-Token`，新增 502 `PROVIDER_ERROR` 与 404 `NOT_FOUND` 错误路径）。
 - alpha-3（2026-08-31，内部迭代）：总控 Agent 拆分为 controller（长链思考产成者）与新增的 meta Agent（完整循环的检查与管理，输出 decision / next_direction，`log_intermediate` 归属 meta）；`intermediate_log` 键名由 `controller_reflection` 改为 `meta_reflection`；新增输入护栏（user_query / candidate ≤20000 字符，context_summary ≤300000 字符，evidence ≤100 条 × ≤20000 字符）；新增 `lock_invoke` 开关（默认 false，开启后 invoke 需 `X-Admin-Token`）；密钥支持环境变量注入（`BTCM_ADMIN_TOKEN` / `BTCM_PROVIDER_<NAME>_API_KEY` / `BTCM_MCP_<NAME>_API_KEY`，优先于配置文件、不回写不回显）；MCP 服务器新增 `allow_private`（默认 false）与仅允许 http/https scheme 的校验；生产环境抬升 httpx 日志级别以防请求 URL 泄漏密钥。
 - alpha-2（2026-08-30，内部迭代）：`/api/invoke` 加并发上限（默认 4，满载立即 429 `RATE_LIMITED`，不排队）；响应 `data` 新增可选 `usage` 计量（prompt/completion tokens、llm_calls、tool_calls）并同步进调用日志；完整循环中 `verdict=fail` 时总控 `decision=stop` 无效（不得定稿失败）；LLM 失败重试加 0.5s 退避；非本地提供商缺 api_key 时直接返回可操作错误；MCP 工具输出加注入防护包裹（资料非指令）；MCP 连接缓存随配置变更失效；新增 `GET /api/health` 探活端点；配置更新与日志写入加锁串行化；调用日志加上限裁剪与异步写；新增结构化运行日志（btcmodule.* logger）。
