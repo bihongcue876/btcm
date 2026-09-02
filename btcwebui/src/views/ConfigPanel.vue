@@ -35,6 +35,12 @@ const clearedMcpApiKeys = reactive<Record<string, boolean>>({})
 const adminTokenInput = ref('')
 const clearedAdminToken = ref(false)
 
+// 服务端已注册的提供商名：拉取模型走服务端，条目未保存时服务端不认识它
+const serverProviders = ref<Set<string>>(new Set())
+// 本地已删除、保存时以 null 通知服务端移除（RFC 7386 删除语义）
+const deletedProviders = ref<string[]>([])
+const deletedMcpServers = ref<string[]>([])
+
 const addingProvider = ref(false)
 const newProviderName = ref('')
 const newProviderBaseUrl = ref('')
@@ -198,6 +204,9 @@ async function load() {
     providerNames.value = Object.keys(cfg.providers)
     agentNames.value = Object.keys(cfg.agents)
     mcpServerNames.value = Object.keys(cfg.mcp_servers)
+    serverProviders.value = new Set(providerNames.value)
+    deletedProviders.value = []
+    deletedMcpServers.value = []
     Object.keys(apiKeys).forEach((k) => delete apiKeys[k])
     Object.keys(clearedApiKeys).forEach((k) => delete clearedApiKeys[k])
     Object.keys(mcpApiKeys).forEach((k) => delete mcpApiKeys[k])
@@ -228,8 +237,17 @@ function addProvider() {
     message.warning(`提供商 ${name} 已存在`)
     return
   }
+  const baseUrl = newProviderBaseUrl.value.trim()
+  if (!baseUrl) {
+    message.warning('请输入 base_url（可先用上方预设自动填充）')
+    return
+  }
+  if (!/^https?:\/\//i.test(baseUrl)) {
+    message.warning('base_url 仅支持 http:// 或 https:// 开头')
+    return
+  }
   cfg.providers[name] = {
-    base_url: newProviderBaseUrl.value.trim() || 'https://api.example.com/v1',
+    base_url: baseUrl,
     models: [],
     timeout: 120,
     enabled: true,
@@ -240,32 +258,60 @@ function addProvider() {
   if (newProviderApiKey.value.trim()) {
     apiKeys[name] = newProviderApiKey.value.trim()
   }
+  // 删除后又重新添加同名条目：撤销待删除标记，否则保存时会把它一并删掉
+  deletedProviders.value = deletedProviders.value.filter((n) => n !== name)
   providerNames.value = Object.keys(cfg.providers)
   addingProvider.value = false
   newProviderName.value = ''
   newProviderBaseUrl.value = ''
   newProviderPreset.value = null
   newProviderApiKey.value = ''
-  message.success(`已添加提供商 ${name}，记得保存`)
+  message.success(`已添加提供商 ${name}，点击「保存配置」写入服务端`)
 }
 
 // ---------- 模型发现：从服务端拉取可用模型列表 ----------
 
 const fetchingModels = reactive<Record<string, boolean>>({})
 
-async function fetchModels(name: string) {
+/** 拉取模型走服务端代理，要求该提供商已存在于服务端配置 */
+function fetchModels(name: string) {
+  if (fetchingModels[name]) return
+  if (!serverProviders.value.has(name)) {
+    dialog.warning({
+      title: `提供商「${name}」尚未保存到服务端`,
+      content:
+        '拉取模型由服务端代理发起，未保存的条目服务端不认识（直接拉取会返回「提供商不存在」）。'
+        + '继续将先保存当前配置的全部未保存修改，再拉取模型。',
+      positiveText: '保存并拉取',
+      negativeText: '取消',
+      async onPositiveClick() {
+        const saved = await save()
+        if (saved) await doFetchModels(name)
+      },
+    })
+    return
+  }
+  void doFetchModels(name)
+}
+
+async function doFetchModels(name: string) {
   if (fetchingModels[name]) return
   fetchingModels[name] = true
   try {
     const models = await api.fetchProviderModels(name)
     if (models.length) {
       cfg.providers[name].models = models
-      message.success(`已拉取 ${name} 的 ${models.length} 个模型，记得保存`)
+      message.success(`已拉取 ${name} 的 ${models.length} 个模型，点击「保存配置」写入`)
     } else {
       message.warning(`${name} 返回空模型列表（该服务可能不支持 /models）`)
     }
   } catch (e) {
-    message.error(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e))
+    const msg = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e)
+    message.error(
+      e instanceof ApiError && e.code === 'NOT_FOUND'
+        ? `${msg}（该提供商需先保存到服务端）`
+        : msg,
+    )
   } finally {
     fetchingModels[name] = false
   }
@@ -278,7 +324,12 @@ function removeProvider(name: string) {
     delete apiKeys[name]
     delete clearedApiKeys[name]
     delete providerOptionsText[name]
+    // 服务端已有该条目时，保存需显式发 null 才会真正移除
+    if (serverProviders.value.has(name)) {
+      deletedProviders.value.push(name)
+    }
     providerNames.value = Object.keys(cfg.providers)
+    message.success(`已删除提供商 ${name}，点击「保存配置」生效`)
   }
   if (usedBy.length > 0) {
     dialog.warning({
@@ -335,6 +386,9 @@ function removeMcpServer(name: string) {
       }
     }
     mcpServerNames.value = Object.keys(cfg.mcp_servers)
+    // 服务端对该键发 null 是无害空操作，故不必区分是否已保存
+    deletedMcpServers.value.push(name)
+    message.success(`已删除 MCP 服务器 ${name}，点击「保存配置」生效`)
   }
   if (usedBy.length > 0) {
     dialog.warning({
@@ -439,11 +493,20 @@ async function save() {
         payload.agents[name].model = null
       }
     }
+    // 已删除的注册表条目：显式发 null，服务端按 RFC 7386 语义移除
+    for (const name of deletedProviders.value) {
+      ;(payload.providers as Record<string, unknown>)[name] = null
+    }
+    for (const name of deletedMcpServers.value) {
+      ;(payload.mcp_servers as Record<string, unknown>)[name] = null
+    }
     await api.updateConfig(payload)
     message.success('配置已保存')
     await load()
+    return true
   } catch (e) {
     message.error(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e))
+    return false
   } finally {
     submitting.value = false
   }
@@ -656,6 +719,17 @@ onMounted(load)
                   :style="{ color: cfg.providers[name].enabled === false ? '#5d6474' : undefined }"
                 >{{ name }}</span>
                 <span class="mono chip">{{ cfg.providers[name].base_url }}</span>
+                <n-tag
+                  v-if="!serverProviders.has(name)"
+                  size="tiny"
+                  round
+                  :bordered="false"
+                  type="info"
+                  class="subtle-tag"
+                  title="该条目尚未写入服务端配置，保存后才生效"
+                >
+                  未保存
+                </n-tag>
                 <n-tag size="tiny" round :bordered="false" class="subtle-tag">
                   {{ providerModelCount(name) }} 模型
                 </n-tag>
