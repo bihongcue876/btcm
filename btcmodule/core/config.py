@@ -90,6 +90,19 @@ class ProviderConfig(BaseModel):
     enabled: bool = True
     options: dict = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _check_base_url(self) -> "ProviderConfig":
+        # 本地推理服务（Ollama / LM Studio）经 http://localhost 接入是合法用法，
+        # 故只校验 scheme 与主机名，不做 MCP 那套私网地址限制
+        u = urlparse(self.base_url)
+        if u.scheme not in ("http", "https"):
+            raise ValueError(
+                f"提供商 base_url scheme 仅允许 http/https，收到：{u.scheme or '（空）'}"
+            )
+        if not u.hostname:
+            raise ValueError(f"提供商 base_url 缺少主机名：{self.base_url}")
+        return self
+
 
 class MCPServerConfig(BaseModel):
     """MCP 服务器注册表条目（Streamable HTTP 传输）。
@@ -262,10 +275,17 @@ def build_default_config() -> BTCMConfig:
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """深度合并：嵌套 dict 递归合并，list/标量整体替换。"""
+    """深度合并：嵌套 dict 递归合并，list/标量整体替换。
+
+    遵循 JSON Merge Patch（RFC 7386）语义：override 中值为 null 的键表示删除。
+    缺此语义时注册表条目无法删除——providers / mcp_servers 是 dict，
+    递归合并会让 payload 中已移除的条目从旧配置复活。
+    """
     out = dict(base)
     for key, value in override.items():
-        if key in out and isinstance(out[key], dict) and isinstance(value, dict):
+        if value is None:
+            out.pop(key, None)
+        elif key in out and isinstance(out[key], dict) and isinstance(value, dict):
             out[key] = _deep_merge(out[key], value)
         else:
             out[key] = value

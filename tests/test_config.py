@@ -119,6 +119,45 @@ class ConfigManagerTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             cm.update({"agents": {"creative": None, "validator": None}})
 
+    def test_update_null_removes_provider(self):
+        """null 表示删除（RFC 7386）：否则深合并会让已删条目从旧配置复活。"""
+        cm = ConfigManager(path=self.path)
+        cm.update({
+            "providers": {
+                "temp": {
+                    "base_url": "https://api.example.com/v1",
+                    "models": [],
+                    "enabled": True,
+                }
+            }
+        })
+        self.assertIn("temp", cm.config.providers)
+        cm.update({"providers": {"temp": None}})
+        self.assertNotIn("temp", cm.config.providers)
+        self.assertNotIn("temp", _cfg_bytes(self.path)["providers"])
+
+    def test_update_null_removes_mcp_server(self):
+        cm = ConfigManager(path=self.path)
+        cm.update({
+            "mcp_servers": {
+                "temp": {"url": "https://example.com/mcp", "enabled": True}
+            }
+        })
+        self.assertIn("temp", cm.config.mcp_servers)
+        cm.update({"mcp_servers": {"temp": None}})
+        self.assertNotIn("temp", cm.config.mcp_servers)
+
+    def test_provider_base_url_rejects_bad_scheme(self):
+        cm = ConfigManager(path=self.path)
+        for bad in ("ftp://api.example.com/v1", "api.example.com/v1", ""):
+            with self.assertRaises(ConfigError):
+                cm.update({"providers": {"bad": {"base_url": bad}}})
+        # 本地推理服务经 http 接入是合法用法，不受私网限制
+        cm.update({
+            "providers": {"local": {"base_url": "http://localhost:11434/v1"}}
+        })
+        self.assertIn("local", cm.config.providers)
+
     def test_as_public_dict_hides_api_key(self):
         cm = ConfigManager(path=self.path)
         cm.update({"providers": {"deepseek": {"api_key": "sk-secret"}}})
