@@ -249,7 +249,7 @@ function addProvider() {
   cfg.providers[name] = {
     base_url: baseUrl,
     models: [],
-    timeout: 120,
+    timeout: 300,
     enabled: true,
     options: {},
   }
@@ -443,7 +443,7 @@ async function save() {
     const payload = JSON.parse(JSON.stringify(cfg)) as GlobalConfig
     for (const name of providerNames.value) {
       if (payload.providers[name].timeout == null) {
-        payload.providers[name].timeout = 120
+        payload.providers[name].timeout = 300
       }
       if (payload.providers[name].enabled == null) {
         payload.providers[name].enabled = true
@@ -816,7 +816,7 @@ onMounted(load)
                 :min="1"
                 :max="3600"
                 style="width: 100%"
-                @update:value="(v: number | null) => (cfg.providers[name].timeout = v ?? 120)"
+                @update:value="(v: number | null) => (cfg.providers[name].timeout = v ?? 300)"
               />
             </n-form-item-gi>
             <n-form-item-gi label="models（回车添加标签）" label-placement="top" style="margin-bottom: 12px">
