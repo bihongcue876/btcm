@@ -32,6 +32,18 @@ class MCPError(Exception):
     """MCP 服务器通信失败。"""
 
 
+# 异常消息中密钥值消毒模式：apikey=<secret>/apiKey=<secret> 等 query 参数
+_SECRET_QUERY_RE = re.compile(
+    r"((?:api[_-]?key|token|key|password)=)[^&\s'\"]+", re.IGNORECASE
+)
+
+
+def _sanitize(text: str) -> str:
+    """消毒异常文本：预设 URL 以 query 参数携带密钥（如 tavilyApiKey=...），
+    httpx 部分异常的 str 含完整 URL，进日志前先抹掉密钥值。"""
+    return _SECRET_QUERY_RE.sub(r"\1***", text)
+
+
 def openai_tool_name(server: str, tool: str) -> str:
     """生成 OpenAI function 名：{server}_{tool}，清理非法字符并限长。"""
     raw = f"{server}_{tool}"
@@ -198,7 +210,11 @@ class MCPManager:
             return tools
         except (MCPError, httpx.HTTPError, OSError) as e:
             self._failed.add(name)
-            logger.warning("MCP 服务器 '%s' 不可用，本次退回纯逻辑验证：%s", name, e)
+            logger.warning(
+                "MCP 服务器 '%s' 不可用，本次退回纯逻辑验证：%s",
+                name,
+                _sanitize(str(e)),
+            )
             return []
 
     async def openai_tools(

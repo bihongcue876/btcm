@@ -14,7 +14,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from urllib.parse import urlparse
 
@@ -33,9 +33,6 @@ REQUIRED_AGENTS = ("creative", "validator", "controller", "meta")
 
 # 全局兜底模型：所有解析链最终回退目标
 DEFAULT_FALLBACK_MODEL = "gpt-3.5-turbo"
-
-# 结构化输出模式
-STRUCTURED_OUTPUT_MODES = ("text", "json_object")
 
 # 内置 MCP 预设：市面常见远程 MCP 服务器（Streamable HTTP），url 中 {api_key} 会被替换
 MCP_PRESETS: dict[str, dict] = {
@@ -91,7 +88,7 @@ class ProviderConfig(BaseModel):
     base_url: str
     api_key: str | None = None
     models: list[str] = Field(default_factory=list)
-    timeout: int = Field(default=600, ge=1, le=3600)
+    timeout: int = Field(default=600, ge=1)
     enabled: bool = True
     options: dict = Field(default_factory=dict)
 
@@ -119,7 +116,7 @@ class MCPServerConfig(BaseModel):
     url: str | None = None
     api_key: str | None = None
     enabled: bool = True
-    timeout: int = Field(default=60, ge=1, le=600)
+    timeout: int = Field(default=60, ge=1)
     allowed_tools: list[str] = Field(default_factory=list)
     allow_private: bool = False
 
@@ -212,14 +209,16 @@ class AgentConfig(BaseModel):
     """Agent 路由与运行参数。provider/model 为空时跟随全局默认。
 
     options 为模型私有参数（如 chat_template_kwargs），覆盖提供商级 options。
+    数值参数仅设下限、不设上限（用户自定义）；temperature 上限 2 为
+    OpenAI 兼容 API 的通行约定，超过会被提供商拒绝，故保留。
     """
 
     provider: str | None = None
     model: str | None = None
-    num_candidates: int = Field(default=3, ge=1, le=10)
+    num_candidates: int = Field(default=3, ge=1)
     temperature: float = Field(default=0.3, ge=0, le=2)
-    max_tokens: int = Field(default=16384, ge=256, le=32768)
-    timeout: int | None = Field(default=None, ge=1, le=3600)
+    max_tokens: int = Field(default=16384, ge=256)
+    timeout: int | None = Field(default=None, ge=1)
     enable_web_search: bool = False
     web_sources: list[str] = Field(default_factory=lambda: list(DEFAULT_WEB_SOURCES))
     mcp_servers: list[str] = Field(default_factory=list)
@@ -230,18 +229,32 @@ class AgentConfig(BaseModel):
 class BTCMConfig(BaseModel):
     """全局配置（btcm.json 的完整结构）。"""
 
-    max_iterations: int = Field(default=2, ge=1, le=10)
-    timeout: int = Field(default=3600, ge=1, le=3600)
+    max_iterations: int = Field(default=2, ge=1, le=50)
+    timeout: int = Field(default=3600, ge=1)
     enable_creative: bool = True
     enable_validator: bool = True
     admin_token: str | None = None
     lock_invoke: bool = False
     default_provider: str | None = None
     default_model: str | None = None
-    structured_output: str = Field(default="text")
+    structured_output: Literal["text", "json_object"] = "text"
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_admin_token(self) -> "BTCMConfig":
+        # X-Admin-Token 经 HTTP 头传递（头值为 latin-1），非 ASCII 值
+        # 客户端无法发送、服务端无法比对，直接在配置层拒绝
+        if self.admin_token is not None:
+            try:
+                self.admin_token.encode("latin-1")
+            except UnicodeEncodeError as e:
+                raise ValueError(
+                    "admin_token 仅允许 ASCII / latin-1 字符"
+                    "（需经 X-Admin-Token HTTP 头传递）"
+                ) from e
+        return self
 
 
 def build_default_config() -> BTCMConfig:

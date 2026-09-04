@@ -1,4 +1,4 @@
-﻿"""REST API 路由：/api/invoke、/api/invoke/stream、/api/config、/api/logs、/api/health。
+"""REST API 路由：/api/invoke、/api/invoke/stream、/api/config、/api/logs、/api/health。
 
 统一外层结构 {success, data, error, request_id}，见协议第 1.3 节。
 配置 admin_token 后，PUT /api/config、POST /api/config/reset、GET /api/logs
@@ -55,7 +55,9 @@ def _denied(request: Request) -> JSONResponse | None:
     if not token:
         return None
     provided = request.headers.get("x-admin-token", "")
-    if secrets.compare_digest(provided, token):
+    # encode 为 bytes：compare_digest 对 str 要求 ASCII-only，
+    # 非 ASCII token 会抛 TypeError 变 500；bytes 比较不受限且时序安全
+    if secrets.compare_digest(provided.encode(), token.encode()):
         return None
     return JSONResponse(
         status_code=401,
@@ -69,20 +71,15 @@ def _denied(request: Request) -> JSONResponse | None:
     )
 
 
-@router.post("/invoke")
-async def invoke(body: InvokeRequest, request: Request) -> JSONResponse:
-    engine = request.app.state.engine
-    call_logger = request.app.state.logger
+async def _precheck(request: Request, task: Task) -> JSONResponse | None:
+    """/invoke 与 /invoke/stream 共用的流前校验。
+
+    依次检查：lock_invoke 鉴权、纯验证缺 candidate、并发上限；
+    拒绝路径记调用日志并返回对应错误响应，通过返回 None。
+    """
     cm = request.app.state.config_manager
+    call_logger = request.app.state.logger
 
-    # 开关未提供时回落全局配置默认值
-    task = Task.from_request(
-        body,
-        default_enable_creative=cm.config.enable_creative,
-        default_enable_validator=cm.config.enable_validator,
-    )
-
-    # lock_invoke 开启时 invoke 也需 X-Admin-Token
     if cm.config.lock_invoke:
         denied = _denied(request)
         if denied is not None:
@@ -104,14 +101,16 @@ async def invoke(body: InvokeRequest, request: Request) -> JSONResponse:
                 "error": "INVALID_REQUEST",
             }
         )
-        resp = fail(
-            ErrorInfo(
-                code="INVALID_REQUEST",
-                message="纯验证形态（enable_creative=false）下 candidate 必填",
-            ),
-            task.request_id,
+        return JSONResponse(
+            status_code=400,
+            content=fail(
+                ErrorInfo(
+                    code="INVALID_REQUEST",
+                    message="纯验证形态（enable_creative=false）下 candidate 必填",
+                ),
+                task.request_id,
+            ).model_dump(),
         )
-        return JSONResponse(status_code=400, content=resp.model_dump())
 
     if _invoke_semaphore.locked():
         await call_logger.append(
@@ -143,6 +142,25 @@ async def invoke(body: InvokeRequest, request: Request) -> JSONResponse:
                 task.request_id,
             ).model_dump(),
         )
+    return None
+
+
+@router.post("/invoke")
+async def invoke(body: InvokeRequest, request: Request) -> JSONResponse:
+    engine = request.app.state.engine
+    call_logger = request.app.state.logger
+    cm = request.app.state.config_manager
+
+    # 开关未提供时回落全局配置默认值
+    task = Task.from_request(
+        body,
+        default_enable_creative=cm.config.enable_creative,
+        default_enable_validator=cm.config.enable_validator,
+    )
+
+    rejected = await _precheck(request, task)
+    if rejected is not None:
+        return rejected
 
     start = time.monotonic()
     usage_var.set(
@@ -245,63 +263,9 @@ async def invoke_stream(body: InvokeRequest, request: Request):
         default_enable_validator=cm.config.enable_validator,
     )
 
-    if cm.config.lock_invoke:
-        denied = _denied(request)
-        if denied is not None:
-            return denied
-
-    # 纯验证形态下 candidate 必填（与 /invoke 一致，同样记调用日志）
-    if not task.enable_creative and task.enable_validator and not task.candidate:
-        await call_logger.append(
-            {
-                "request_id": task.request_id,
-                "timestamp": _now(),
-                "enable_creative": task.enable_creative,
-                "enable_validator": task.enable_validator,
-                "verdict": None,
-                "iterations_used": None,
-                "termination_reason": None,
-                "user_query": task.user_query,
-                "duration_ms": 0,
-                "error": "INVALID_REQUEST",
-            }
-        )
-        return JSONResponse(
-            status_code=400,
-            content=fail(
-                ErrorInfo(
-                    code="INVALID_REQUEST",
-                    message="纯验证形态（enable_creative=false）下 candidate 必填",
-                ),
-                task.request_id,
-            ).model_dump(),
-        )
-
-    if _invoke_semaphore.locked():
-        await call_logger.append(
-            {
-                "request_id": task.request_id,
-                "timestamp": _now(),
-                "enable_creative": task.enable_creative,
-                "enable_validator": task.enable_validator,
-                "verdict": None,
-                "iterations_used": None,
-                "termination_reason": None,
-                "user_query": task.user_query,
-                "duration_ms": 0,
-                "error": "RATE_LIMITED",
-            }
-        )
-        return JSONResponse(
-            status_code=429,
-            content=fail(
-                ErrorInfo(
-                    code="RATE_LIMITED",
-                    message=f"并发调用已达上限（{INVOKE_CONCURRENCY}），请稍后重试",
-                ),
-                task.request_id,
-            ).model_dump(),
-        )
+    rejected = await _precheck(request, task)
+    if rejected is not None:
+        return rejected
 
     queue: asyncio.Queue = asyncio.Queue()
 

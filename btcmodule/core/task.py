@@ -18,14 +18,24 @@ from pydantic import BaseModel, Field, field_validator
 # deep 深层（充分深思提示词）。映射详见 agents/base.py EFFORT_DIRECTIVES。
 EFFORT_LEVELS = ("light", "standard", "deep")
 
+# 输入长度上限：防超大请求体耗尽内存/ token 预算；对正常思考任务足够宽裕
+MAX_QUERY_CHARS = 50_000
+MAX_SUMMARY_CHARS = 50_000
+MAX_EVIDENCE_ITEMS = 32
+MAX_EVIDENCE_CHARS = 200_000
+
 
 class RuntimeAgentConfig(BaseModel):
-    """请求内 config.agents.<name> 的运行时覆盖项（全部可选）。"""
+    """请求内 config.agents.<name> 的运行时覆盖项（全部可选）。
 
-    num_candidates: int | None = Field(default=None, ge=1, le=10)
+    数值参数仅设下限、不设上限（用户自定义）；temperature 上限 2 为
+    OpenAI 兼容 API 的通行约定，超过会被提供商拒绝，故保留。
+    """
+
+    num_candidates: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0, le=2)
-    max_tokens: int | None = Field(default=None, ge=256, le=32768)
-    timeout: int | None = Field(default=None, ge=1, le=3600)
+    max_tokens: int | None = Field(default=None, ge=256)
+    timeout: int | None = Field(default=None, ge=1)
     enable_web_search: bool | None = None
     web_sources: list[str] | None = None
     log_intermediate: bool | None = None
@@ -34,8 +44,8 @@ class RuntimeAgentConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     """请求内 config 对象。"""
 
-    max_iterations: int | None = Field(default=None, ge=1, le=10)
-    timeout: int | None = Field(default=None, ge=1, le=3600)
+    max_iterations: int | None = Field(default=None, ge=1, le=50)
+    timeout: int | None = Field(default=None, ge=1)
     agents: dict[str, RuntimeAgentConfig] = Field(default_factory=dict)
 
 
@@ -44,13 +54,18 @@ class InvokeRequest(BaseModel):
 
     两个启用开关缺省为 None：未提供时由路由层回落到全局配置的默认值
     （协议约定：请求体未提供则使用全局配置的 enable_creative / enable_validator）。
+    文本字段设长度上限：防超大请求体耗尽内存与 token 预算。
     """
 
-    request_id: str | None = None
-    user_query: str = Field(..., min_length=1, max_length=20000)
-    candidate: str | None = Field(default=None, max_length=20000)
-    evidence: list[str] = Field(default_factory=list, max_length=100)
-    context_summary: str | None = Field(default=None, max_length=300000)
+    request_id: str | None = Field(default=None, max_length=64)
+    user_query: str = Field(..., min_length=1, max_length=MAX_QUERY_CHARS)
+    candidate: str | None = Field(default=None, max_length=MAX_QUERY_CHARS)
+    evidence: list[str] = Field(
+        default_factory=list, max_length=MAX_EVIDENCE_ITEMS
+    )
+    context_summary: str | None = Field(
+        default=None, max_length=MAX_SUMMARY_CHARS
+    )
     enable_creative: bool | None = None
     enable_validator: bool | None = None
     effort: Literal["light", "standard", "deep"] | None = None
@@ -58,10 +73,12 @@ class InvokeRequest(BaseModel):
 
     @field_validator("evidence")
     @classmethod
-    def _check_evidence(cls, v: list[str]) -> list[str]:
-        for i, item in enumerate(v):
-            if len(item) > 20000:
-                raise ValueError(f"evidence[{i}] 超过 20000 字符上限")
+    def _check_evidence_size(cls, v: list[str]) -> list[str]:
+        total = sum(len(item) for item in v)
+        if total > MAX_EVIDENCE_CHARS:
+            raise ValueError(
+                f"evidence 总字符数超上限（{total} > {MAX_EVIDENCE_CHARS}）"
+            )
         return v
 
 

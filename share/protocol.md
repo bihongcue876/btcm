@@ -88,11 +88,11 @@
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `request_id` | string (uuid) | 否 | 服务端生成 | 客户端追踪 ID，若不提供则服务端生成并返回 |
-| `user_query` | string | 是 | - | 用户问题或任务描述，作为思考的主要输入；长度上限 20000 字符 |
-| `candidate` | string | 否 | null | 待验证或待改进的候选内容；`enable_creative=false` 且 `enable_validator=true`（纯验证形态）时必填，缺失返回 `INVALID_REQUEST`；其他形态可选；长度上限 20000 字符 |
-| `evidence` | array of strings | 否 | [] | 提供给验证 Agent 的参考证据列表，可来自外部知识库/工具；最多 100 条，每条上限 20000 字符 |
-| `context_summary` | string | 否 | null | 由主控压缩的上下文摘要，帮助 BTCM 理解背景；长度上限 300000 字符（大上下文直传，不压缩） |
+| `request_id` | string | 否 | 服务端生成 | 客户端追踪 ID，若不提供则服务端生成并返回；至多 64 字符 |
+| `user_query` | string | 是 | - | 用户问题或任务描述，作为思考的主要输入；至多 50000 字符 |
+| `candidate` | string | 否 | null | 待验证或待改进的候选内容；`enable_creative=false` 且 `enable_validator=true`（纯验证形态）时必填，缺失返回 `INVALID_REQUEST`；其他形态可选；至多 50000 字符 |
+| `evidence` | array of strings | 否 | [] | 提供给验证 Agent 的参考证据列表，可来自外部知识库/工具；至多 32 条，总字符数至多 200000 |
+| `context_summary` | string | 否 | null | 由主控压缩的上下文摘要，帮助 BTCM 理解背景；至多 50000 字符（超出部分应由调用方压缩） |
 | `enable_creative` | boolean | 否 | true | 是否启用创意生成 Agent；与 `enable_validator` 组合决定运行形态，见下方形态说明 |
 | `enable_validator` | boolean | 否 | true | 是否启用验证 Agent；与 `enable_creative` 组合决定运行形态，见下方形态说明 |
 | `effort` | string | 否 | "standard" | 思考深度三档：`light`（略想，强制单轮 + 快速提示词，本地 Qwen 系模板会关闭思考开关）、`standard`（通用，按配置正常运行）、`deep`（深层，提示词要求充分深思）。非法取值返回 `INVALID_REQUEST` |
@@ -109,16 +109,16 @@
 
 两种纯形态为单次执行（`iterations_used` 恒为 1，`termination_reason` 恒为 `single_pass`）；完整循环与长链持续思考为多轮执行，受 `max_iterations` / `timeout` 约束。
 
-**`config` 对象字段**（可覆盖全局配置，未提供的字段使用默认值；仅接受下列运行时参数，模型与提供商（`providers`/`agents` 的 provider、model）为全局配置，不接受请求内覆盖；`enable_creative` / `enable_validator` 为请求体顶层字段，不受 `config` 约束）：
+**`config` 对象字段**（可覆盖全局配置，未提供的字段使用默认值；仅接受下列运行时参数，模型与提供商（`providers`/`agents` 的 provider、model）为全局配置，不接受请求内覆盖；`enable_creative` / `enable_validator` 为请求体顶层字段，不受 `config` 约束；数值参数仅设下限、不设上限，由调用方按需自定义）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `max_iterations` | integer | 最大循环轮数，范围 1~10，默认 2（仅完整循环与长链持续思考形态生效；`effort=light` 时强制为 1） |
-| `timeout` | integer | 单次调用（含全部循环轮次）超时秒数，范围 1~3600，默认 3600 |
-| `agents.creative.num_candidates` | integer | 创意 Agent 发散轮候选数上限参考，范围 1~10，默认 3；数量不设硬性要求，不强制凑数 |
-| `agents.<agent>.temperature` | float | 各 Agent 采样温度，范围 0~2；`<agent>` 可为 creative / validator / controller / meta，默认值分别为 0.8 / 0.3 / 0.3 / 0.3 |
-| `agents.<agent>.max_tokens` | integer | 各 Agent 单次请求最大输出 token 数，范围 256~32768；默认 16384（面向本地推理的大输出预算；云端提供商输出上限较低时会拒绝过大的值，按需调低，如 deepseek-chat ≤8192） |
-| `agents.<agent>.timeout` | integer | 各 Agent 单次 LLM 请求超时秒数，范围 1~3600；默认未设置，使用所属提供商的 `timeout` |
+| `max_iterations` | integer | 最大循环轮数，1~50，默认 2（仅完整循环与长链持续思考形态生效；`effort=light` 时强制为 1） |
+| `timeout` | integer | 单次调用（含全部循环轮次）超时秒数，≥1，默认 3600 |
+| `agents.creative.num_candidates` | integer | 创意 Agent 发散轮候选数上限参考，≥1，默认 3；数量不设硬性要求，不强制凑数 |
+| `agents.<agent>.temperature` | float | 各 Agent 采样温度，范围 0~2（OpenAI 兼容 API 通行约定，超过会被提供商拒绝）；`<agent>` 可为 creative / validator / controller / meta，默认值分别为 0.8 / 0.3 / 0.3 / 0.3 |
+| `agents.<agent>.max_tokens` | integer | 各 Agent 单次请求最大输出 token 数，≥256，无上限；默认 16384（面向本地推理的大输出预算；云端提供商输出上限较低时会拒绝过大的值，按需调低，如 deepseek-chat ≤8192） |
+| `agents.<agent>.timeout` | integer | 各 Agent 单次 LLM 请求超时秒数，≥1，无上限；默认未设置，使用所属提供商的 `timeout` |
 | `agents.validator.enable_web_search` | boolean | 是否允许验证 Agent 使用联网工具（MCP），默认 false |
 | `agents.validator.web_sources` | array of strings | 联网验证期望的权威域名（提示词参考），默认 `["wikipedia.org", "gov.cn", "edu.cn"]` |
 | `agents.validator.mcp_servers` | array of strings | 验证 Agent 可用的 MCP 服务器名列表，引用 `mcp_servers` 注册表条目 |
@@ -255,7 +255,7 @@
 | 错误码 | 说明 |
 |--------|------|
 | `INVALID_REQUEST` | 请求体缺少必要字段或格式错误 |
-| `CONFIG_VALIDATION_ERROR` | `config` 中参数超出允许范围或类型错误 |
+| `CONFIG_VALIDATION_ERROR` | `config` 中参数类型错误、低于下限或不符合结构约定 |
 | `TIMEOUT` | 任务执行超时 |
 | `RATE_LIMITED` | 并发调用达到上限（默认 4），稍后重试（HTTP 429） |
 | `UNAUTHORIZED` | 受保护端点缺少或错误的管理令牌（HTTP 401） |
@@ -371,8 +371,8 @@ data: {"success": true, "data": {...}, "error": null, "request_id": "..."}
 
 - `enable_creative` / `enable_validator` 为 Agent 启用开关的全局默认值，请求体顶层字段可对当次调用覆盖；总控类 Agent（controller / meta）恒启用，无开关。
 - `providers` 为 OpenAI 兼容提供商注册表，各 Agent 通过 `provider` + `model` 指向其一，可分别使用不同提供商与模型。
-- `mcp_servers` 为 MCP 服务器注册表（验证 Agent 联网工具），条目字段：`preset`（内置预设名，可选）或 `url`（直接给出 Streamable HTTP 端点）、`api_key`（预设需要密钥时填写）、`enabled`（默认 true）、`timeout`（单请求超时秒数，默认 60）、`allowed_tools`（工具白名单，留空 = 全部）、`allow_private`（默认 false，指向内网/回环地址时需显式放行）。Agent 经 `agents.validator.mcp_servers` 引用条目名。
-- 提供商字段：`base_url`（必填，仅接受 `http` / `https` scheme 且必须含主机名，如 `https://api.deepseek.com/v1`、`http://localhost:11434/v1`；`ftp://` 或缺 scheme 等无效地址返回 400 `CONFIG_VALIDATION_ERROR`。本地地址合法，不受 MCP 那套私网限制）、`models`（该提供商可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 300）。本地推理服务（Ollama、llama.cpp、LM Studio 等）同样经 OpenAI 兼容接口接入，推理较慢，建议按需放宽 `timeout`（如 600）；本地服务无需鉴权，`api_key` 可省略或填任意占位值。
+- `mcp_servers` 为 MCP 服务器注册表（验证 Agent 联网工具），条目字段：`preset`（内置预设名，可选：tavily / exa / deepwiki / fetch / duckduckgo）或 `url`（直接给出 Streamable HTTP 端点）、`api_key`（预设需要密钥时填写）、`enabled`（默认 true）、`timeout`（单请求超时秒数，默认 60，仅设下限 ≥1、无上限）、`allowed_tools`（工具白名单，留空 = 全部）、`allow_private`（默认 false，指向内网/回环地址时需显式放行；`duckduckgo` 预设指向本地 `http://127.0.0.1:7070/mcp`，需置 true）。Agent 经 `agents.validator.mcp_servers` 引用条目名。`duckduckgo` 预设免密钥：后端启动时检测到该预设条目启用即经 uvx 自动拉起本地 `duckduckgo-mcp-server`（含 browser extra），暴露 `search` / `fetch_content` 工具，退出时随进程清理；拉起失败仅告警，验证 Agent 当次降级纯逻辑验证。
+- 提供商字段：`base_url`（必填，仅接受 `http` / `https` scheme 且必须含主机名，如 `https://api.deepseek.com/v1`、`http://localhost:11434/v1`；`ftp://` 或缺 scheme 等无效地址返回 400 `CONFIG_VALIDATION_ERROR`。本地地址合法，不受 MCP 那套私网限制）、`models`（该提供商可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 600，仅设下限 ≥1、无上限）。本地推理服务（Ollama、llama.cpp、LM Studio 等）同样经 OpenAI 兼容接口接入，推理较慢，可按需进一步放宽 `timeout`；本地服务无需鉴权，`api_key` 可省略或填任意占位值。
 - `providers.<name>.api_key`、`mcp_servers.<name>.api_key` 与 `admin_token` 仅在 `PUT /api/config` 时写入，`GET /api/config` 不回显这些字段；但回显只读布尔：`providers.<name>.api_key_set`、`mcp_servers.<name>.api_key_set` 与顶层 `admin_token_set`（环境变量注入的密钥亦计为已设置），供控制面板展示 BYOK 配置状态。
 
 ---
@@ -552,7 +552,7 @@ data: {"success": true, "data": {...}, "error": null, "request_id": "..."}
 
 ## 4. 超时与中断
 
-- 超时分为三层，各司其职：
+- 超时分为三层，各司其职（各层均只设下限 ≥1 秒、无上限，由用户按需自定义）：
   - **全局 `timeout`**（默认 3600 秒）：单次调用（含全部循环轮次）的总时长限制。
   - **Agent 级 `agents.<name>.timeout`**（可选）：该 Agent 单次 LLM 请求超时，设置后覆盖提供商值。
   - **提供商级 `providers.<name>.timeout`**（默认 600 秒）：该提供商下单次 LLM 请求超时，Agent 级未设置时生效。
@@ -571,6 +571,8 @@ data: {"success": true, "data": {...}, "error": null, "request_id": "..."}
 ---
 
 ## 6. 变更记录
+
+- alpha-8（2026-09-04，内部迭代）：数值参数放开上限（仅保留下限，用户自定义）——请求体与全局配置的 `timeout`（≥1 秒）、`max_tokens`（≥256）、`num_candidates`（≥1）、提供商/MCP `timeout`（≥1 秒）不再设上限；`max_iterations` 统一限 1~50；`temperature` 保留 0~2（OpenAI 兼容 API 通行约定，超过会被提供商拒绝）。请求体文本字段设防滥用上限（`user_query` / `candidate` / `context_summary` 至多 50000 字符，`evidence` 至多 32 条且总字符数至多 200000，`request_id` 至多 64 字符）。`structured_output` 收敛为枚举 `text` / `json_object`。`admin_token` 仅允许 ASCII / latin-1 字符（需经 X-Admin-Token 头传递）。新增 `duckduckgo` 检索预设（本地 MCP 子进程，后端自动拉起、随配置启停）。前端思考面板修复单块内容超长时被 flex 压缩掩盖且无法滚动的问题。
 
 - alpha-7（2026-09-04，内部迭代）：新增流式端点 `POST /api/invoke/stream`（SSE：start / agent_start / delta / agent_done / iteration_done / done / error 事件，15 秒心跳，done/error 携带与 `/invoke` 同构的完整响应；调用日志与并发限制同 `/invoke`，客户端断开掐断执行）；新增请求字段 `effort` 三档思考深度（light 略想：强制单轮 + 快速提示词 + 本地 Qwen 系模板关闭思考开关；standard 通用：默认；deep 深层：充分深思提示词）；新增剩余轮次注入（meta 收到剩余修正轮数与收束提醒，创意 Agent 最后一轮收到定稿标记，长链 controller 最后一轮收到收敛提示；`intermediate_log.meta_reflection` 新增 `remaining_iterations`）；创意 Agent 候选数量不再强制凑数（`num_candidates` 降为上限参考）；全局 `timeout` 默认 300 → 3600 秒，提供商 `timeout` 默认 300 → 600 秒（validator Agent 默认 600 秒）；`providers` / `agents` 新增 `options` 对象（模型私有参数透传，Agent 级覆盖提供商级）。
 
