@@ -1,14 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useMessage } from 'naive-ui'
-import { api, ApiError, invokeStream } from '@/api/client'
+import { api } from '@/api/client'
 import { formatDurationMs } from '@/labels'
-import type {
-  ApiError as ApiErrorType,
-  InvokeData,
-  InvokePayload,
-  StreamBlock,
-} from '@/types'
+import { abortRun, startRun, useRunSession } from '@/composables/useRunSession'
+import type { InvokePayload } from '@/types'
 import InvokeForm from '@/components/InvokeForm.vue'
 import ResultView from '@/components/ResultView.vue'
 import ThinkingStream from '@/components/ThinkingStream.vue'
@@ -17,6 +13,10 @@ const message = useMessage()
 // 形态开关跟随全局配置（配置页 enable_creative / enable_validator），运行页只读展示
 const creative = ref(true)
 const validator = ref(true)
+
+// 调用会话为模块级单例：切换页面不中止进行中的流，回到本页继续展示
+const { result, error, loading, durationMs, requestId, elapsedMs, streamBlocks } =
+  useRunSession()
 
 const SHAPE_META = {
   hybrid: { label: '完整循环', desc: '生成 → 验证 → 反思' },
@@ -35,22 +35,6 @@ const shape = computed(() => {
         : 'longchain'
   return { key, ...SHAPE_META[key] }
 })
-const result = ref<InvokeData | null>(null)
-const error = ref<ApiErrorType | null>(null)
-const loading = ref(false)
-const durationMs = ref<number>()
-const requestId = ref('')
-const elapsedMs = ref(0)
-let elapsedTimer: ReturnType<typeof setInterval> | undefined
-
-// 流式面板：agent_start/delta/agent_done 事件聚合为可折叠块
-const streamBlocks = ref<StreamBlock[]>([])
-let blockSeq = 0
-let abortController: AbortController | null = null
-// 调用序号：新请求覆盖旧请求时，旧调用的收尾不再干扰新调用的状态
-let runSeq = 0
-// 区分"用户主动中止"与"被新请求覆盖中止"
-let userAborted = false
 
 async function syncSwitchesFromGlobal() {
   try {
@@ -62,119 +46,15 @@ async function syncSwitchesFromGlobal() {
   }
 }
 
-function applyStreamEvent(event: Record<string, unknown>) {
-  const type = event['type'] as string
-  if (type === 'start') {
-    requestId.value = String(event['request_id'] ?? '')
-    return
-  }
-  if (type === 'agent_start') {
-    streamBlocks.value.push({
-      id: `b${++blockSeq}`,
-      agent: event['agent'] as StreamBlock['agent'],
-      iteration: event['iteration'] as number | string,
-      reasoning: '',
-      content: '',
-      done: false,
-    })
-    return
-  }
-  if (type === 'delta') {
-    const block = [...streamBlocks.value]
-      .reverse()
-      .find((b) => b.agent === event['agent'] && !b.done)
-    if (block) {
-      const key = event['kind'] === 'reasoning' ? 'reasoning' : 'content'
-      block[key] += String(event['text'] ?? '')
-    }
-    return
-  }
-  if (type === 'agent_done') {
-    const block = [...streamBlocks.value]
-      .reverse()
-      .find((b) => b.agent === event['agent'] && !b.done)
-    if (block) block.done = true
-  }
-}
-
 async function handleSubmit(payload: InvokePayload) {
-  // 上一次调用若仍在进行，直接掐断，避免并发达上限
-  abortController?.abort()
-  abortController = new AbortController()
-  const signal = abortController.signal
-  const seq = ++runSeq
-  userAborted = false
-
-  loading.value = true
-  error.value = null
-  result.value = null
-  requestId.value = ''
-  durationMs.value = undefined
-  streamBlocks.value = []
-  const started = performance.now()
-  elapsedMs.value = 0
-  clearInterval(elapsedTimer)
-  elapsedTimer = setInterval(() => {
-    elapsedMs.value = Math.round(performance.now() - started)
-  }, 1000)
-  try {
-    await invokeStream(
-      payload,
-      {
-        onEvent: (e) => applyStreamEvent(e as unknown as Record<string, unknown>),
-        onDone: (body) => {
-          durationMs.value = Math.round(performance.now() - started)
-          result.value = body.data
-        },
-        onError: (body) => {
-          durationMs.value = Math.round(performance.now() - started)
-          error.value = body.error ?? { code: 'UNKNOWN', message: '未知错误' }
-        },
-      },
-      signal,
-    )
-  } catch (e) {
-    // 已被更新的调用覆盖：任何错误都不再写状态，避免污染新调用
-    if (seq !== runSeq) {
-      // 空分支：静默吞掉
-    } else if (e instanceof ApiError && e.code === 'STREAM_INTERRUPTED') {
-      // 事件已部分展示，仅提示连接中断
-      error.value = { code: e.code, message: e.message }
-    } else if (e instanceof DOMException && e.name === 'AbortError') {
-      // 用户主动中止：给出提示；被新请求覆盖：静默
-      if (userAborted) {
-        durationMs.value = Math.round(performance.now() - started)
-        error.value = {
-          code: 'ABORTED',
-          message: '已中止本次调用，服务端任务已停止；思考过程保留在上方',
-        }
-        message.info('已中止当前调用')
-      }
-    } else if (e instanceof ApiError) {
-      error.value = { code: e.code, message: e.message }
-    } else {
-      error.value = { code: 'UNKNOWN', message: String(e) }
-    }
-  } finally {
-    // 仅当本次调用仍是最新调用时才收尾，避免旧调用的清理覆盖新调用的状态
-    if (seq === runSeq) {
-      clearInterval(elapsedTimer)
-      loading.value = false
-    }
-  }
+  await startRun(payload)
 }
 
 function handleAbort() {
-  if (!loading.value || !abortController) return
-  userAborted = true
-  abortController.abort()
+  if (abortRun()) message.info('已中止当前调用')
 }
 
 onMounted(syncSwitchesFromGlobal)
-onUnmounted(() => {
-  clearInterval(elapsedTimer)
-  abortController?.abort()
-})
 </script>
 
 <template>
