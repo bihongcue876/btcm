@@ -69,10 +69,10 @@ AGENT_DEFAULT_TEMPERATURE = {
     "meta": 0.3,
 }
 AGENT_DEFAULT_MAX_TOKENS = {
-    "creative": 2048,
-    "validator": 2048,
-    "controller": 1024,
-    "meta": 1024,
+    "creative": 16384,
+    "validator": 16384,
+    "controller": 16384,
+    "meta": 16384,
 }
 
 
@@ -86,7 +86,7 @@ class ProviderConfig(BaseModel):
     base_url: str
     api_key: str | None = None
     models: list[str] = Field(default_factory=list)
-    timeout: int = Field(default=120, ge=1, le=3600)
+    timeout: int = Field(default=300, ge=1, le=3600)
     enabled: bool = True
     options: dict = Field(default_factory=dict)
 
@@ -210,7 +210,7 @@ class AgentConfig(BaseModel):
     model: str | None = None
     num_candidates: int = Field(default=3, ge=1, le=10)
     temperature: float = Field(default=0.3, ge=0, le=2)
-    max_tokens: int = Field(default=2048, ge=256, le=32768)
+    max_tokens: int = Field(default=16384, ge=256, le=32768)
     timeout: int | None = Field(default=None, ge=1, le=3600)
     enable_web_search: bool = False
     web_sources: list[str] = Field(default_factory=lambda: list(DEFAULT_WEB_SOURCES))
@@ -464,11 +464,11 @@ def resolve_agent_params(
                 if value is not None:
                     effective[key] = value
 
-    # timeout 兜底：Agent 级与请求级均未设置时，使用所属提供商的 timeout（默认 120）
+    # timeout 兜底：Agent 级与请求级均未设置时，使用所属提供商的 timeout（默认 300）
     if effective.get("timeout") is None:
         provider_name = resolve_provider_name(cfg, agent_name)
         provider_cfg = cfg.providers.get(provider_name)
-        effective["timeout"] = provider_cfg.timeout if provider_cfg else 120
+        effective["timeout"] = provider_cfg.timeout if provider_cfg else 300
 
     return effective
 

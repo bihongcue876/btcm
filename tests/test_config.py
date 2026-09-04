@@ -36,10 +36,10 @@ class ConfigDefaultTest(unittest.TestCase):
         )
         self.assertEqual(cfg.agents["creative"].temperature, 0.8)
         self.assertEqual(cfg.agents["validator"].temperature, 0.3)
-        self.assertEqual(cfg.agents["controller"].max_tokens, 1024)
+        self.assertEqual(cfg.agents["controller"].max_tokens, 16384)
         self.assertEqual(cfg.agents["validator"].timeout, 300)
         self.assertEqual(cfg.agents["meta"].temperature, 0.3)
-        self.assertEqual(cfg.agents["meta"].max_tokens, 1024)
+        self.assertEqual(cfg.agents["meta"].max_tokens, 16384)
         self.assertEqual(cfg.agents["meta"].provider, "deepseek")
 
 
@@ -194,9 +194,9 @@ class ResolveParamsTest(unittest.TestCase):
         params = resolve_agent_params(self.cm.config, None, "creative")
         self.assertEqual(params["num_candidates"], 3)
         self.assertEqual(params["temperature"], 0.8)
-        self.assertEqual(params["max_tokens"], 2048)
-        # creative 未设 agent timeout -> 用 provider timeout（deepseek 120）
-        self.assertEqual(params["timeout"], 120)
+        self.assertEqual(params["max_tokens"], 16384)
+        # creative 未设 agent timeout -> 用 provider timeout（deepseek 默认 300）
+        self.assertEqual(params["timeout"], 300)
 
     def test_agent_timeout_falls_back_to_provider(self):
         params = resolve_agent_params(self.cm.config, None, "validator")
