@@ -28,8 +28,8 @@ export default defineConfig({
   build: {
     // 产物输出到 btcwebui/build/，再由脚本复制到 btcmodule/static/（spec 约定）
     outDir: 'build',
-    // 沙箱环境会拦截工作区内非空目录删除；旧产物由部署前手动清理
-    emptyOutDir: false,
+    // 每次构建清空旧产物：hashed 文件名只在当次有效，累积只会越滚越大
+    emptyOutDir: true,
     rollupOptions: {
       output: {
         // 框架独立 chunk：长缓存 + 主包瘦身。
