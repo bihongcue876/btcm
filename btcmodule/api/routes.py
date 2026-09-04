@@ -1,4 +1,4 @@
-﻿"""REST API 路由：/api/invoke、/api/config、/api/logs、/api/health、/api/providers。
+﻿"""REST API 路由：/api/invoke、/api/invoke/stream、/api/config、/api/logs、/api/health。
 
 统一外层结构 {success, data, error, request_id}，见协议第 1.3 节。
 配置 admin_token 后，PUT /api/config、POST /api/config/reset、GET /api/logs
@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -17,10 +18,10 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.config import ConfigError
-from ..core.llm import LLMError, usage_var
+from ..core.llm import LLMError, stream_sink, usage_var
 from ..core.result import BTCMError, ErrorInfo, fail, ok
 from ..core.task import InvokeRequest, Task
 
@@ -216,6 +217,236 @@ async def invoke(body: InvokeRequest, request: Request) -> JSONResponse:
         (usage or {}).get("completion_tokens"),
     )
     return JSONResponse(content=ok(data, task.request_id).model_dump())
+
+
+STREAM_HEARTBEAT_SECONDS = 15
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.post("/invoke/stream")
+async def invoke_stream(body: InvokeRequest, request: Request):
+    """SSE 流式调用：与 /invoke 同语义同校验，Agent 增量思考内容经事件流前传。
+
+    事件序列：start → (agent_start / delta / agent_done / iteration_done)* →
+    done | error；done/error 的 data 为与 /invoke 响应同构的完整 ApiResponse。
+    流开始前的校验失败（鉴权、缺 candidate、限流）直接返回 JSON 错误，
+    与 /invoke 行为一致；流开始后的失败经 error 事件返回。
+    """
+    engine = request.app.state.engine
+    call_logger = request.app.state.logger
+    cm = request.app.state.config_manager
+
+    task = Task.from_request(
+        body,
+        default_enable_creative=cm.config.enable_creative,
+        default_enable_validator=cm.config.enable_validator,
+    )
+
+    if cm.config.lock_invoke:
+        denied = _denied(request)
+        if denied is not None:
+            return denied
+
+    # 纯验证形态下 candidate 必填（与 /invoke 一致，同样记调用日志）
+    if not task.enable_creative and task.enable_validator and not task.candidate:
+        await call_logger.append(
+            {
+                "request_id": task.request_id,
+                "timestamp": _now(),
+                "enable_creative": task.enable_creative,
+                "enable_validator": task.enable_validator,
+                "verdict": None,
+                "iterations_used": None,
+                "termination_reason": None,
+                "user_query": task.user_query,
+                "duration_ms": 0,
+                "error": "INVALID_REQUEST",
+            }
+        )
+        return JSONResponse(
+            status_code=400,
+            content=fail(
+                ErrorInfo(
+                    code="INVALID_REQUEST",
+                    message="纯验证形态（enable_creative=false）下 candidate 必填",
+                ),
+                task.request_id,
+            ).model_dump(),
+        )
+
+    if _invoke_semaphore.locked():
+        await call_logger.append(
+            {
+                "request_id": task.request_id,
+                "timestamp": _now(),
+                "enable_creative": task.enable_creative,
+                "enable_validator": task.enable_validator,
+                "verdict": None,
+                "iterations_used": None,
+                "termination_reason": None,
+                "user_query": task.user_query,
+                "duration_ms": 0,
+                "error": "RATE_LIMITED",
+            }
+        )
+        return JSONResponse(
+            status_code=429,
+            content=fail(
+                ErrorInfo(
+                    code="RATE_LIMITED",
+                    message=f"并发调用已达上限（{INVOKE_CONCURRENCY}），请稍后重试",
+                ),
+                task.request_id,
+            ).model_dump(),
+        )
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _sink(event: dict) -> None:
+        queue.put_nowait(("event", event))
+
+    # sink 经 ContextVar 进入 create_task 复制的执行上下文，llm 层据此走流式
+    stream_sink.set(_sink)
+
+    async def _execute():
+        try:
+            async with _invoke_semaphore:
+                usage_var.set(
+                    {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "llm_calls": 0,
+                        "tool_calls": 0,
+                    }
+                )
+                data = await engine.run(task)
+                usage = usage_var.get()
+                if usage and usage.get("llm_calls", 0) > 0:
+                    data["usage"] = usage
+            queue.put_nowait(("result", data))
+        except BTCMError as e:
+            queue.put_nowait(("error", e))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            queue.put_nowait(
+                (
+                    "error",
+                    BTCMError(
+                        "INTERNAL_ERROR",
+                        f"内部错误：{type(e).__name__}: {e}",
+                        status_code=500,
+                    ),
+                )
+            )
+        finally:
+            queue.put_nowait(None)
+
+    agent_task = asyncio.create_task(_execute())
+
+    async def _gen():
+        start = time.monotonic()
+        result: dict | None = None
+        error: BTCMError | None = None
+        try:
+            yield _sse(
+                "start",
+                {
+                    "request_id": task.request_id,
+                    "enable_creative": task.enable_creative,
+                    "enable_validator": task.enable_validator,
+                },
+            )
+            while True:
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(), timeout=STREAM_HEARTBEAT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+                if item is None:
+                    break
+                kind, payload = item
+                if kind == "result":
+                    result = payload
+                elif kind == "error":
+                    error = payload
+                else:
+                    yield _sse(payload["type"], payload)
+
+            duration_ms = int((time.monotonic() - start) * 1000)
+            if result is not None:
+                await call_logger.append(
+                    {
+                        "request_id": task.request_id,
+                        "timestamp": _now(),
+                        "enable_creative": task.enable_creative,
+                        "enable_validator": task.enable_validator,
+                        "verdict": result.get("verdict"),
+                        "iterations_used": result.get("iterations_used"),
+                        "termination_reason": result.get("termination_reason"),
+                        "user_query": task.user_query,
+                        "duration_ms": duration_ms,
+                        "conclusion": result.get("conclusion"),
+                        "usage": result.get("usage"),
+                    }
+                )
+                logger.info(
+                    "invoke/stream 完成 形态=%s/%s 终止=%s 轮次=%s 耗时=%dms",
+                    task.enable_creative,
+                    task.enable_validator,
+                    result.get("termination_reason"),
+                    result.get("iterations_used"),
+                    duration_ms,
+                )
+                yield _sse("done", ok(result, task.request_id).model_dump())
+            else:
+                e = error or BTCMError("INTERNAL_ERROR", "未知错误", status_code=500)
+                await call_logger.append(
+                    {
+                        "request_id": task.request_id,
+                        "timestamp": _now(),
+                        "enable_creative": task.enable_creative,
+                        "enable_validator": task.enable_validator,
+                        "verdict": None,
+                        "iterations_used": None,
+                        "termination_reason": None,
+                        "user_query": task.user_query,
+                        "duration_ms": duration_ms,
+                        "error": e.code,
+                    }
+                )
+                logger.warning(
+                    "invoke/stream 失败 code=%s request_id=%s 耗时=%dms",
+                    e.code,
+                    task.request_id,
+                    duration_ms,
+                )
+                yield _sse(
+                    "error",
+                    fail(
+                        ErrorInfo(code=e.code, message=e.message, details=e.details),
+                        task.request_id,
+                    ).model_dump(),
+                )
+        finally:
+            # 客户端断开时掐断仍在执行的调用，避免空耗模型
+            if not agent_task.done():
+                agent_task.cancel()
+            try:
+                await agent_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/config")

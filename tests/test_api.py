@@ -1,7 +1,8 @@
-"""API 层集成测试：统一外层结构、配置读写、四种形态、日志接口。"""
+"""API 层集成测试：统一外层结构、配置读写、四种形态、流式端点、日志接口。"""
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 import unittest.mock
@@ -56,7 +57,7 @@ class ConfigApiTest(unittest.TestCase):
             r = client.put("/api/config", json={"max_iterations": 5})
             self.assertEqual(r.status_code, 200)
             self.assertEqual(r.json()["data"]["max_iterations"], 5)
-            self.assertEqual(r.json()["data"]["timeout"], 300)
+            self.assertEqual(r.json()["data"]["timeout"], 3600)
             # 再 GET 一次验证持久化后的全局状态
             self.assertEqual(
                 client.get("/api/config").json()["data"]["max_iterations"], 5
@@ -94,7 +95,7 @@ class ConfigApiTest(unittest.TestCase):
             self.assertEqual(r.status_code, 200)
             data = r.json()["data"]
             self.assertEqual(data["max_iterations"], 2)
-            self.assertEqual(data["timeout"], 300)
+            self.assertEqual(data["timeout"], 3600)
             self.assertTrue(data["enable_creative"])
             self.assertTrue(data["enable_validator"])
         finally:
@@ -327,6 +328,100 @@ class HealthApiTest(unittest.TestCase):
             self.assertEqual(data["status"], "ok")
             self.assertEqual(data["version"], "0.0.0")
             self.assertIsInstance(data["uptime_s"], int)
+        finally:
+            patcher.stop()
+            tmp.cleanup()
+
+
+class StreamApiTest(unittest.TestCase):
+    """POST /api/invoke/stream：SSE 事件序列、错误事件与日志落盘。"""
+
+    @staticmethod
+    def _events(text: str) -> list[tuple[str, dict]]:
+        events = []
+        for block in text.split("\n\n"):
+            name = None
+            data_lines = []
+            for line in block.splitlines():
+                if line.startswith("event: "):
+                    name = line[7:]
+                elif line.startswith("data: "):
+                    data_lines.append(line[6:])
+            if name and data_lines:
+                events.append((name, json.loads("\n".join(data_lines))))
+        return events
+
+    def test_stream_event_sequence(self):
+        client, fake, patcher, tmp = make_client()
+        try:
+            r = client.post(
+                "/api/invoke/stream", json={"user_query": "给个旅行计划"}
+            )
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("text/event-stream", r.headers["content-type"])
+            events = self._events(r.text)
+            names = [n for n, _ in events]
+            self.assertEqual(names[0], "start")
+            self.assertEqual(names[-1], "done")
+            self.assertIn("agent_start", names)
+            self.assertIn("iteration_done", names)
+            by_name = dict(events)
+            self.assertTrue(by_name["start"]["request_id"])
+            self.assertTrue(by_name["done"]["success"])
+            self.assertEqual(by_name["done"]["data"]["iterations_used"], 2)
+        finally:
+            patcher.stop()
+            tmp.cleanup()
+
+    def test_stream_error_event(self):
+        """流开始后的失败以 error 事件返回完整错误结构。"""
+        client, fake, patcher, tmp = make_client(raise_llm_error={"creative"})
+        try:
+            r = client.post("/api/invoke/stream", json={"user_query": "坏任务"})
+            self.assertEqual(r.status_code, 200)
+            events = self._events(r.text)
+            name, payload = events[-1]
+            self.assertEqual(name, "error")
+            self.assertFalse(payload["success"])
+            self.assertEqual(payload["error"]["code"], "INTERNAL_ERROR")
+        finally:
+            patcher.stop()
+            tmp.cleanup()
+
+    def test_stream_missing_candidate_json_error(self):
+        """流开始前的校验失败返回普通 JSON 错误，与 /invoke 行为一致。"""
+        client, fake, patcher, tmp = make_client()
+        try:
+            r = client.post(
+                "/api/invoke/stream",
+                json={
+                    "user_query": "验证这个方案",
+                    "enable_creative": False,
+                    "enable_validator": True,
+                },
+            )
+            self.assertEqual(r.status_code, 400)
+            self.assertEqual(r.json()["error"]["code"], "INVALID_REQUEST")
+        finally:
+            patcher.stop()
+            tmp.cleanup()
+
+    def test_stream_writes_call_log(self):
+        client, fake, patcher, tmp = make_client()
+        try:
+            client.post(
+                "/api/invoke/stream",
+                json={
+                    "user_query": "hello",
+                    "enable_creative": False,
+                    "enable_validator": False,
+                },
+            )
+            r = client.get("/api/logs?limit=10")
+            self.assertEqual(r.status_code, 200)
+            data = r.json()["data"]
+            self.assertEqual(data["total"], 1)
+            self.assertEqual(data["items"][0]["user_query"], "hello")
         finally:
             patcher.stop()
             tmp.cleanup()
