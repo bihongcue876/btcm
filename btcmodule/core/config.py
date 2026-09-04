@@ -86,7 +86,7 @@ class ProviderConfig(BaseModel):
     base_url: str
     api_key: str | None = None
     models: list[str] = Field(default_factory=list)
-    timeout: int = Field(default=300, ge=1, le=3600)
+    timeout: int = Field(default=600, ge=1, le=3600)
     enabled: bool = True
     options: dict = Field(default_factory=dict)
 
@@ -204,7 +204,10 @@ def resolve_mcp_url(srv_name: str, srv: MCPServerConfig) -> str:
 
 
 class AgentConfig(BaseModel):
-    """Agent 路由与运行参数。provider/model 为空时跟随全局默认。"""
+    """Agent 路由与运行参数。provider/model 为空时跟随全局默认。
+
+    options 为模型私有参数（如 chat_template_kwargs），覆盖提供商级 options。
+    """
 
     provider: str | None = None
     model: str | None = None
@@ -216,13 +219,14 @@ class AgentConfig(BaseModel):
     web_sources: list[str] = Field(default_factory=lambda: list(DEFAULT_WEB_SOURCES))
     mcp_servers: list[str] = Field(default_factory=list)
     log_intermediate: bool = True
+    options: dict = Field(default_factory=dict)
 
 
 class BTCMConfig(BaseModel):
     """全局配置（btcm.json 的完整结构）。"""
 
     max_iterations: int = Field(default=2, ge=1, le=10)
-    timeout: int = Field(default=300, ge=1, le=3600)
+    timeout: int = Field(default=3600, ge=1, le=3600)
     enable_creative: bool = True
     enable_validator: bool = True
     admin_token: str | None = None
@@ -244,7 +248,7 @@ def build_default_config() -> BTCMConfig:
             model="deepseek-chat" if name != "validator" else "deepseek-reasoner",
             temperature=AGENT_DEFAULT_TEMPERATURE[name],
             max_tokens=AGENT_DEFAULT_MAX_TOKENS[name],
-            timeout=300 if name == "validator" else None,
+            timeout=600 if name == "validator" else None,
             enable_web_search=False,
             web_sources=list(DEFAULT_WEB_SOURCES),
             log_intermediate=True,
@@ -252,7 +256,7 @@ def build_default_config() -> BTCMConfig:
 
     return BTCMConfig(
         max_iterations=2,
-        timeout=300,
+        timeout=3600,
         enable_creative=True,
         enable_validator=True,
         default_provider="deepseek",
@@ -464,11 +468,17 @@ def resolve_agent_params(
                 if value is not None:
                     effective[key] = value
 
-    # timeout 兜底：Agent 级与请求级均未设置时，使用所属提供商的 timeout（默认 300）
+    # options 合并：提供商 options 为底，Agent 级 options 覆盖
+    provider_name = resolve_provider_name(cfg, agent_name)
+    provider_cfg = cfg.providers.get(provider_name)
+    effective["options"] = {
+        **(provider_cfg.options if provider_cfg else {}),
+        **(effective.get("options") or {}),
+    }
+
+    # timeout 兜底：Agent 级与请求级均未设置时，使用所属提供商的 timeout（默认 600）
     if effective.get("timeout") is None:
-        provider_name = resolve_provider_name(cfg, agent_name)
-        provider_cfg = cfg.providers.get(provider_name)
-        effective["timeout"] = provider_cfg.timeout if provider_cfg else 300
+        effective["timeout"] = provider_cfg.timeout if provider_cfg else 600
 
     return effective
 

@@ -10,7 +10,13 @@ from __future__ import annotations
 from ..core.config import ConfigManager, resolve_agent_params
 from ..core.llm import ModelGateway
 from ..core.task import RuntimeConfig, Task
-from .base import AgentOutputError, parse_json_object, require_keys, run_agent_with_retry
+from .base import (
+    AgentOutputError,
+    effort_directive,
+    parse_json_object,
+    require_keys,
+    run_agent_with_retry,
+)
 
 
 class CreativeAgent:
@@ -25,6 +31,7 @@ class CreativeAgent:
         validation_feedback: dict | None,
         runtime: RuntimeConfig | None,
         next_direction: str | None = None,
+        is_final: bool = False,
     ) -> dict:
         """生成候选列表与综合结论。首轮发散生成；后续轮基于最优候选与验证问题修正。"""
 
@@ -53,9 +60,12 @@ class CreativeAgent:
             "生成少量修正候选，不重新发散。\n"
             "发散是被鼓励的：候选之间保持真实差异；"
             "但每个候选必须完整可用、逻辑自洽，并附简要理由。\n"
+            "候选数量不设硬性要求：能想到几个就几个，"
+            "不要为凑数编造低质量候选。\n"
             "conclusion 必须综合全部候选：概括各候选的取舍与适用情形，"
             "不得只突出单一候选。\n"
-            "输出必须严格是 JSON 对象，格式为：\n"
+            + effort_directive(task.effort)
+            + "输出必须严格是 JSON 对象，格式为：\n"
             '{"candidates": ["候选1（含简要理由）", "候选2（含简要理由）", ...], '
             '"conclusion": "综合全部候选的推荐说明"}'
         )
@@ -75,7 +85,15 @@ class CreativeAgent:
                 "本轮为修正轮：基于最优候选与验证问题生成 1-2 个修正候选，不重新发散。"
             )
         else:
-            user_lines.append(f"本轮为发散轮：请生成 {num_candidates} 个多样候选方案。")
+            user_lines.append(
+                f"本轮为发散轮：请生成多个多样候选方案（配置上限 {num_candidates} 个），"
+                "数量不设硬性要求，能想到几个就几个。"
+            )
+        if is_final:
+            user_lines.append(
+                "本轮是最后一轮：请直接产出可直接采纳的最终候选，"
+                "确保完整、自洽、不留待后续修正。"
+            )
         if next_direction:
             user_lines.append(f"总控下轮方向：{next_direction}")
 

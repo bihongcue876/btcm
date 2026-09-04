@@ -20,6 +20,26 @@ from ..core.task import RuntimeConfig
 # 重试退避：429/瞬时故障立即重试基本必败，稍候再试
 RETRY_BACKOFF_SECONDS = 0.5
 
+# 思考深度指令：按请求 effort 注入各 Agent 系统提示词（standard 不注入，按常规运行）。
+# light 只改提示词与轮次（另由 llm 层对本地 Qwen 系模板关闭思考开关），deep 仅提示词。
+EFFORT_DIRECTIVES: dict[str, str] = {
+    "light": (
+        "本轮思考深度要求：略想。快速给出可用的判断与结果，"
+        "不展开长篇推理与铺陈分析，不为完备性补充冗余内容；"
+        "宁可结论简短，不要深思。"
+    ),
+    "deep": (
+        "本轮思考深度要求：深层。请充分深思：多角度检验逻辑与事实，"
+        "主动挖掘漏洞与反例，严谨论证后再给出结论。"
+    ),
+}
+
+
+def effort_directive(effort: str | None) -> str:
+    """返回注入系统提示词的思考深度指令（standard/未指定返回空串），自带结尾换行。"""
+    directive = EFFORT_DIRECTIVES.get(effort or "", "")
+    return directive + "\n" if directive else ""
+
 
 class AgentOutputError(Exception):
     """Agent 结构化输出解析失败（重试后仍失败）。"""

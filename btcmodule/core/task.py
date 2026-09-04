@@ -10,8 +10,13 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+# 思考深度三档：light 略想（强制单轮 + 快速提示词），standard 通用（默认），
+# deep 深层（充分深思提示词）。映射详见 agents/base.py EFFORT_DIRECTIVES。
+EFFORT_LEVELS = ("light", "standard", "deep")
 
 
 class RuntimeAgentConfig(BaseModel):
@@ -48,6 +53,7 @@ class InvokeRequest(BaseModel):
     context_summary: str | None = Field(default=None, max_length=300000)
     enable_creative: bool | None = None
     enable_validator: bool | None = None
+    effort: Literal["light", "standard", "deep"] | None = None
     config: RuntimeConfig | None = None
 
     @field_validator("evidence")
@@ -69,6 +75,7 @@ class Task(BaseModel):
     context_summary: str | None
     enable_creative: bool
     enable_validator: bool
+    effort: str | None = None
     runtime_config: RuntimeConfig | None = None
 
     @classmethod
@@ -95,5 +102,6 @@ class Task(BaseModel):
                 if req.enable_validator is None
                 else req.enable_validator
             ),
+            effort=req.effort,
             runtime_config=req.config,
         )

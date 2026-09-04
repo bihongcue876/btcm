@@ -9,7 +9,13 @@ from __future__ import annotations
 from ..core.config import ConfigManager
 from ..core.llm import ModelGateway
 from ..core.task import RuntimeConfig, Task
-from .base import AgentOutputError, parse_json_object, require_keys, run_agent_with_retry
+from .base import (
+    AgentOutputError,
+    effort_directive,
+    parse_json_object,
+    require_keys,
+    run_agent_with_retry,
+)
 
 HISTORY_KEEP = 5
 
@@ -42,6 +48,7 @@ class ControllerAgent:
         previous_thoughts: list[str],
         iteration: int,
         runtime: RuntimeConfig | None,
+        total_iterations: int | None = None,
     ) -> dict:
         """单轮长链思考：基于任务与已有要点输出新一轮思考要点。"""
         system = (
@@ -49,7 +56,8 @@ class ControllerAgent:
             "每轮对任务与已有要点作批判性深化：检验逻辑、发现漏洞、补充论据、"
             "收敛结论，逐轮逼近一个合理的结果。\n"
             "只输出本轮新的要点，不重复已有内容，不展开长篇推理。\n"
-            "输出必须严格是 JSON 对象，格式为："
+            + effort_directive(task.effort)
+            + "输出必须严格是 JSON 对象，格式为："
             '{"thought": "本轮批判性思考要点"}'
         )
 
@@ -62,7 +70,15 @@ class ControllerAgent:
             )
         if previous_thoughts:
             user_lines.append("此前思考要点：\n" + _history_lines(previous_thoughts))
-        user_lines.append(f"这是第 {iteration} 轮思考，请输出本轮新的思考要点。")
+        round_note = f"这是第 {iteration} 轮思考"
+        if total_iterations is not None:
+            round_note += f"（共 {total_iterations} 轮）"
+            if iteration >= total_iterations:
+                round_note += (
+                    "，本轮是最后一轮：请输出收敛性要点，"
+                    "把思考收拢到可整合为最终结论的程度"
+                )
+        user_lines.append(round_note + "，请输出本轮新的思考要点。")
 
         messages = [
             {"role": "system", "content": system},

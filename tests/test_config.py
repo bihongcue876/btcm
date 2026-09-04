@@ -26,7 +26,7 @@ class ConfigDefaultTest(unittest.TestCase):
     def test_default_values(self):
         cfg = build_default_config()
         self.assertEqual(cfg.max_iterations, 2)
-        self.assertEqual(cfg.timeout, 300)
+        self.assertEqual(cfg.timeout, 3600)
         self.assertTrue(cfg.enable_creative)
         self.assertTrue(cfg.enable_validator)
         self.assertIn("deepseek", cfg.providers)
@@ -37,7 +37,7 @@ class ConfigDefaultTest(unittest.TestCase):
         self.assertEqual(cfg.agents["creative"].temperature, 0.8)
         self.assertEqual(cfg.agents["validator"].temperature, 0.3)
         self.assertEqual(cfg.agents["controller"].max_tokens, 16384)
-        self.assertEqual(cfg.agents["validator"].timeout, 300)
+        self.assertEqual(cfg.agents["validator"].timeout, 600)
         self.assertEqual(cfg.agents["meta"].temperature, 0.3)
         self.assertEqual(cfg.agents["meta"].max_tokens, 16384)
         self.assertEqual(cfg.agents["meta"].provider, "deepseek")
@@ -65,7 +65,7 @@ class ConfigManagerTest(unittest.TestCase):
         self.path.write_text(json.dumps(cfg), encoding="utf-8")
         cm = ConfigManager(path=self.path)
         self.assertEqual(cm.config.max_iterations, 7)
-        self.assertEqual(cm.config.timeout, 300)
+        self.assertEqual(cm.config.timeout, 3600)
         self.assertEqual(
             set(cm.config.agents.keys()),
             {"creative", "validator", "controller", "meta"},
@@ -94,7 +94,7 @@ class ConfigManagerTest(unittest.TestCase):
         )
         cfg = cm.config
         self.assertEqual(cfg.max_iterations, 5)
-        self.assertEqual(cfg.timeout, 300)  # 未覆盖
+        self.assertEqual(cfg.timeout, 3600)  # 未覆盖
         self.assertEqual(cfg.providers["deepseek"].api_key, "sk-test")
         self.assertEqual(cfg.providers["deepseek"].base_url, "https://api.deepseek.com/v1")
         self.assertEqual(cfg.agents["validator"].temperature, 0.5)
@@ -184,24 +184,51 @@ class ResolveParamsTest(unittest.TestCase):
 
     def test_global_priority(self):
         cfg = self.cm.config
-        self.assertEqual(resolve_global_params(cfg, None), (2, 300))
+        self.assertEqual(resolve_global_params(cfg, None), (2, 3600))
         runtime = RuntimeConfig(max_iterations=5, timeout=100)
         self.assertEqual(resolve_global_params(cfg, runtime), (5, 100))
         partial = RuntimeConfig(max_iterations=5)
-        self.assertEqual(resolve_global_params(cfg, partial), (5, 300))
+        self.assertEqual(resolve_global_params(cfg, partial), (5, 3600))
 
     def test_agent_defaults(self):
         params = resolve_agent_params(self.cm.config, None, "creative")
         self.assertEqual(params["num_candidates"], 3)
         self.assertEqual(params["temperature"], 0.8)
         self.assertEqual(params["max_tokens"], 16384)
-        # creative 未设 agent timeout -> 用 provider timeout（deepseek 默认 300）
-        self.assertEqual(params["timeout"], 300)
+        # creative 未设 agent timeout -> 用 provider timeout（deepseek 默认 600）
+        self.assertEqual(params["timeout"], 600)
+        self.assertEqual(params["options"], {})
 
     def test_agent_timeout_falls_back_to_provider(self):
         params = resolve_agent_params(self.cm.config, None, "validator")
-        # validator 自身 timeout=300
-        self.assertEqual(params["timeout"], 300)
+        # validator 自身 timeout=600
+        self.assertEqual(params["timeout"], 600)
+
+    def test_agent_options_merge_provider_overridden_by_agent(self):
+        """options 合并：提供商为底，Agent 级覆盖。"""
+        cm = self.cm
+        cm.update(
+            {
+                "providers": {
+                    "deepseek": {"options": {"chat_template_kwargs": {"top_k": 40}}}
+                },
+                "agents": {
+                    "creative": {
+                        "options": {"chat_template_kwargs": {"enable_thinking": False}}
+                    }
+                },
+            }
+        )
+        params = resolve_agent_params(cm.config, None, "creative")
+        self.assertEqual(
+            params["options"],
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        # 未配置 options 的 Agent 仍拿到提供商值
+        params_meta = resolve_agent_params(cm.config, None, "meta")
+        self.assertEqual(
+            params_meta["options"], {"chat_template_kwargs": {"top_k": 40}}
+        )
 
     def test_request_overrides_agent_and_provider(self):
         runtime = RuntimeConfig(

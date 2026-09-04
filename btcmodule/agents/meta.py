@@ -10,7 +10,7 @@ from __future__ import annotations
 from ..core.config import ConfigManager
 from ..core.llm import ModelGateway
 from ..core.task import RuntimeConfig, Task
-from .base import parse_json_object, require_keys, run_agent_with_retry
+from .base import effort_directive, parse_json_object, require_keys, run_agent_with_retry
 
 
 class MetaAgent:
@@ -25,6 +25,7 @@ class MetaAgent:
         validation_report: dict,
         iteration: int,
         runtime: RuntimeConfig | None,
+        remaining_iterations: int | None = None,
     ) -> dict:
         candidate_lines = "\n".join(f"- {c}" for c in candidates)
         system = (
@@ -37,7 +38,8 @@ class MetaAgent:
             "decision 判定：当前最优候选可直接采纳，"
             "或仅剩调用方可自行消化的轻微问题时输出 stop；"
             "存在严重问题且仍有明确修正方向时输出 continue。\n"
-            "输出必须严格是 JSON 对象，格式为：\n"
+            + effort_directive(task.effort)
+            + "输出必须严格是 JSON 对象，格式为：\n"
             '{"conclusion": "当轮总体认识（结论要点）", '
             '"remaining_issues": ["批判性发现的风险与缺口", ...], '
             '"next_direction": "下轮修正方向要点（decision 为 stop 时可省略）", '
@@ -48,6 +50,17 @@ class MetaAgent:
         if task.context_summary:
             user_lines.append(f"上下文摘要：{task.context_summary}")
         user_lines.append(f"第 {iteration} 轮候选：\n{candidate_lines}")
+        if remaining_iterations is not None:
+            if remaining_iterations == 0:
+                user_lines.append(
+                    "当前为最后一轮（无剩余轮次）：候选可用请直接 decision=stop 定稿，"
+                    "仅剩的轻微问题留给调用方自行消化，勿再输出 continue。"
+                )
+            else:
+                user_lines.append(
+                    f"剩余修正轮次：{remaining_iterations}。"
+                    "轮次将近时请尽快考虑收束。"
+                )
         user_lines.append(
             f"验证判定：{validation_report.get('verdict')}\n"
             f"验证问题：\n"

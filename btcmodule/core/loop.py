@@ -20,7 +20,7 @@ from ..agents.creative import CreativeAgent
 from ..agents.meta import MetaAgent
 from ..agents.validator import ValidatorAgent
 from .config import ConfigManager, resolve_agent_params, resolve_global_params
-from .llm import LLMError, ModelGateway
+from .llm import LLMError, ModelGateway, effort_var, stream_sink
 from .mcp import MCPManager
 from .result import BTCMError
 from .task import Task
@@ -58,29 +58,42 @@ class Engine:
 
     async def run(self, task: Task) -> dict:
         """执行一次调用，返回协议 data 结构。"""
+        effort_token = effort_var.set(task.effort)
         try:
-            if task.enable_creative and task.enable_validator:
-                return await self._run_hybrid(task)
-            if task.enable_creative and not task.enable_validator:
-                return await self._run_pure_creative(task)
-            if not task.enable_creative and task.enable_validator:
-                return await self._run_pure_validation(task)
-            return await self._run_long_chain(task)
-        except BTCMError:
-            raise
-        except Exception as e:
-            # 兜底：任何未预期异常（如配置路由错误）统一转为内部错误
-            raise BTCMError(
-                "INTERNAL_ERROR",
-                f"内部错误：{type(e).__name__}: {e}",
-                status_code=500,
-            ) from e
+            try:
+                if task.enable_creative and task.enable_validator:
+                    return await self._run_hybrid(task)
+                if task.enable_creative and not task.enable_validator:
+                    return await self._run_pure_creative(task)
+                if not task.enable_creative and task.enable_validator:
+                    return await self._run_pure_validation(task)
+                return await self._run_long_chain(task)
+            except BTCMError:
+                raise
+            except Exception as e:
+                # 兜底：任何未预期异常（如配置路由错误）统一转为内部错误
+                raise BTCMError(
+                    "INTERNAL_ERROR",
+                    f"内部错误：{type(e).__name__}: {e}",
+                    status_code=500,
+                ) from e
+        finally:
+            effort_var.reset(effort_token)
+
+    def _emit(self, event: dict) -> None:
+        """向前端事件流发送一条事件（非流式路径 sink 为 None，零开销）。"""
+        sink = stream_sink.get()
+        if sink:
+            sink(event)
 
     # ---------- 完整循环 ----------
 
     async def _run_hybrid(self, task: Task) -> dict:
         runtime = task.runtime_config
         max_iterations, timeout = resolve_global_params(self.config, runtime)
+        # 略想档：单轮出结果，不做多轮迭代
+        if effort_var.get() == "light":
+            max_iterations = 1
         params = resolve_agent_params(self.config, runtime, "meta")
         log_intermediate = bool(params["log_intermediate"])
 
@@ -96,6 +109,9 @@ class Engine:
         try:
             async with asyncio.timeout(timeout):
                 for iteration in range(1, max_iterations + 1):
+                    self._emit(
+                        {"type": "agent_start", "agent": "creative", "iteration": iteration}
+                    )
                     gen = await self._safe_call(
                         "creative",
                         lambda: self._creative.generate(
@@ -104,17 +120,40 @@ class Engine:
                             validation_feedback,
                             runtime,
                             next_direction,
+                            is_final=(iteration == max_iterations),
                         ),
                     )
+                    self._emit(
+                        {"type": "agent_done", "agent": "creative", "iteration": iteration}
+                    )
                     candidates = gen["candidates"]
+
+                    self._emit(
+                        {"type": "agent_start", "agent": "validator", "iteration": iteration}
+                    )
                     report = await self._validator.validate(
                         task, candidates, runtime
+                    )
+                    self._emit(
+                        {"type": "agent_done", "agent": "validator", "iteration": iteration}
+                    )
+
+                    self._emit(
+                        {"type": "agent_start", "agent": "meta", "iteration": iteration}
                     )
                     reflection = await self._safe_call(
                         "meta",
                         lambda: self._meta.reflect(
-                            task, candidates, report, iteration, runtime
+                            task,
+                            candidates,
+                            report,
+                            iteration,
+                            runtime,
+                            remaining_iterations=max_iterations - iteration,
                         ),
+                    )
+                    self._emit(
+                        {"type": "agent_done", "agent": "meta", "iteration": iteration}
                     )
 
                     iterations = iteration
@@ -135,9 +174,20 @@ class Engine:
                                     "next_direction": reflection.get(
                                         "next_direction", ""
                                     ),
+                                    "remaining_iterations": max_iterations
+                                    - iteration,
                                 },
                             }
                         )
+
+                    self._emit(
+                        {
+                            "type": "iteration_done",
+                            "iteration": iteration,
+                            "verdict": report["verdict"],
+                            "decision": reflection["decision"],
+                        }
+                    )
 
                     if report["verdict"] == "pass":
                         termination_reason = "validation_passed"
@@ -192,12 +242,14 @@ class Engine:
         _, timeout = resolve_global_params(self.config, runtime)
         try:
             async with asyncio.timeout(timeout):
+                self._emit({"type": "agent_start", "agent": "creative", "iteration": 1})
                 gen = await self._safe_call(
                     "creative",
                     lambda: self._creative.generate(
                         task, task.candidate, None, runtime
                     ),
                 )
+                self._emit({"type": "agent_done", "agent": "creative", "iteration": 1})
         except TimeoutError:
             raise BTCMError("TIMEOUT", "任务执行超时，且未完成") from None
         return {
@@ -219,9 +271,11 @@ class Engine:
         _, timeout = resolve_global_params(self.config, runtime)
         try:
             async with asyncio.timeout(timeout):
+                self._emit({"type": "agent_start", "agent": "validator", "iteration": 1})
                 report = await self._validator.validate(
                     task, [task.candidate], runtime
                 )
+                self._emit({"type": "agent_done", "agent": "validator", "iteration": 1})
         except TimeoutError:
             raise BTCMError("TIMEOUT", "任务执行超时，且未完成") from None
         return {
@@ -239,6 +293,9 @@ class Engine:
     async def _run_long_chain(self, task: Task) -> dict:
         runtime = task.runtime_config
         max_iterations, timeout = resolve_global_params(self.config, runtime)
+        # 略想档：单轮思考后直接整合
+        if effort_var.get() == "light":
+            max_iterations = 1
 
         thoughts: list[str] = []
         intermediate_log: list[dict] = []
@@ -248,11 +305,21 @@ class Engine:
         try:
             async with asyncio.timeout(timeout):
                 for iteration in range(1, max_iterations + 1):
+                    self._emit(
+                        {"type": "agent_start", "agent": "controller", "iteration": iteration}
+                    )
                     out = await self._safe_call(
                         "controller",
                         lambda: self._controller.think(
-                            task, thoughts, iteration, runtime
+                            task,
+                            thoughts,
+                            iteration,
+                            runtime,
+                            total_iterations=max_iterations,
                         ),
+                    )
+                    self._emit(
+                        {"type": "agent_done", "agent": "controller", "iteration": iteration}
                     )
                     thoughts.append(out["thought"])
                     intermediate_log.append(
@@ -263,6 +330,9 @@ class Engine:
                 # 正常终止时 finalize 失败也回退最后一轮，避免把
                 # "已完成思考"降级成 INTERNAL_ERROR
                 if thoughts:
+                    self._emit(
+                        {"type": "agent_start", "agent": "controller", "iteration": "finalize"}
+                    )
                     try:
                         conclusion = await self._safe_call(
                             "controller",
@@ -272,6 +342,9 @@ class Engine:
                         )
                     except BTCMError:
                         conclusion = thoughts[-1]
+                    self._emit(
+                        {"type": "agent_done", "agent": "controller", "iteration": "finalize"}
+                    )
         except TimeoutError:
             termination_reason = "timeout"
             if not thoughts:

@@ -303,5 +303,124 @@ class LongChainTest(unittest.TestCase):
             h.close()
 
 
+class EffortTest(unittest.TestCase):
+    """思考深度三档：light 强制单轮，提示词按档位注入。"""
+
+    def test_light_forces_single_iteration(self):
+        h = TestHarness()
+        try:
+            data = _run(h.engine.run(make_task(effort="light")))
+            self.assertEqual(data["iterations_used"], 1)
+            self.assertEqual(data["termination_reason"], "max_iterations")
+        finally:
+            h.close()
+
+    def test_light_injects_directive_and_is_final(self):
+        h = TestHarness()
+        try:
+            _run(h.engine.run(make_task(effort="light")))
+            sys_content = h.fake.calls[0][1][0]["content"]
+            self.assertIn("略想", sys_content)
+            creative_user = next(
+                c[1][1]["content"] for c in h.fake.calls if c[0] == "creative"
+            )
+            self.assertIn("本轮是最后一轮", creative_user)
+        finally:
+            h.close()
+
+    def test_deep_injects_directive(self):
+        h = TestHarness()
+        try:
+            _run(h.engine.run(make_task(effort="deep")))
+            sys_content = h.fake.calls[0][1][0]["content"]
+            self.assertIn("深层", sys_content)
+        finally:
+            h.close()
+
+    def test_standard_no_directive(self):
+        h = TestHarness()
+        try:
+            _run(h.engine.run(make_task()))
+            sys_content = h.fake.calls[0][1][0]["content"]
+            self.assertNotIn("思考深度要求", sys_content)
+        finally:
+            h.close()
+
+    def test_light_long_chain_single_iteration(self):
+        h = TestHarness()
+        try:
+            data = _run(
+                h.engine.run(
+                    make_task(
+                        effort="light",
+                        enable_creative=False,
+                        enable_validator=False,
+                    )
+                )
+            )
+            self.assertEqual(data["iterations_used"], 1)
+        finally:
+            h.close()
+
+
+class RemainingIterationsTest(unittest.TestCase):
+    """剩余轮次注入：meta 收到收束提示，creative 收到最后一轮标记。"""
+
+    def test_meta_receives_remaining_iterations(self):
+        h = TestHarness()
+        try:
+            _run(h.engine.run(make_task()))
+            meta_calls = [c for c in h.fake.calls if c[0] == "meta"]
+            self.assertEqual(len(meta_calls), 2)
+            first_user = meta_calls[0][1][1]["content"]
+            second_user = meta_calls[1][1][1]["content"]
+            self.assertIn("剩余修正轮次：1", first_user)
+            self.assertIn("最后一轮（无剩余轮次）", second_user)
+        finally:
+            h.close()
+
+    def test_intermediate_log_includes_remaining_iterations(self):
+        h = TestHarness()
+        try:
+            data = _run(h.engine.run(make_task()))
+            for entry in data["intermediate_log"]:
+                self.assertIn("remaining_iterations", entry["meta_reflection"])
+        finally:
+            h.close()
+
+    def test_creative_final_round_on_last_iteration(self):
+        h = TestHarness()
+        try:
+            _run(h.engine.run(make_task()))
+            creative_calls = [c for c in h.fake.calls if c[0] == "creative"]
+            self.assertEqual(len(creative_calls), 2)
+            self.assertNotIn("本轮是最后一轮", creative_calls[0][1][1]["content"])
+            self.assertIn("本轮是最后一轮", creative_calls[1][1][1]["content"])
+        finally:
+            h.close()
+
+    def test_controller_receives_total_iterations(self):
+        h = TestHarness()
+        try:
+            _run(
+                h.engine.run(
+                    make_task(enable_creative=False, enable_validator=False)
+                )
+            )
+            think_calls = [
+                c
+                for c in h.fake.calls
+                if c[0] == "controller" and "长链持续思考" in c[1][0]["content"]
+            ]
+            self.assertEqual(len(think_calls), 2)
+            first_user = think_calls[0][1][1]["content"]
+            second_user = think_calls[1][1][1]["content"]
+            self.assertIn("（共 2 轮）", first_user)
+            self.assertNotIn("最后一轮", first_user)
+            self.assertIn("最后一轮：请输出收敛性要点", second_user)
+        finally:
+            h.close()
+
+
 if __name__ == "__main__":
     unittest.main()
