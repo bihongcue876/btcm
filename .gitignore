@@ -2,6 +2,9 @@
 btcmodule/btcm.json
 docs/
 
+# 版本化发布打包目录（release/v0.0 等，不入库）
+release/
+
 # Python
 __pycache__/
 *.py[cod]
