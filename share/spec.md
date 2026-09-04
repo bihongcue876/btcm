@@ -30,7 +30,7 @@ project-root/
 │   │   ├── config.py          # 配置加载与校验（Pydantic）
 │   │   ├── llm.py             # 模型网关：提供商注册表 + 按 Agent 路由 + 工具调用循环
 │   │   ├── mcp.py             # MCP 最小客户端（Streamable HTTP）与工具管理
-│   │   ├── logger.py          # 调用日志（JSONL，内存镜像 + 上限裁剪）
+│   │   ├── logger.py          # 调用日志（JSONL 追加，永久留存）
 │   │   └── loop.py            # 主循环控制器（Engine）
 │   ├── agents/
 │   │   ├── __init__.py
@@ -171,10 +171,10 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 
 模型管理采用提供商注册表 + 按 Agent 路由（借鉴 DPIM 的 BYOK 模式独立实现）：
 
-- `providers`：注册多个 OpenAI 兼容提供商，各含 `base_url`、`api_key`、`models`（可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 120）。
+- `providers`：注册多个 OpenAI 兼容提供商，各含 `base_url`、`api_key`、`models`（可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 300）。
 - `mcp_servers`：MCP 服务器注册表（Streamable HTTP），条目含 `preset`（内置预设 tavily/exa/deepwiki/fetch）或 `url`、`api_key`、`enabled`、`timeout`（默认 60）、`allowed_tools`（工具白名单）、`allow_private`（默认 false，指向内网/回环地址需显式放行，且 URL 仅允许 http/https）；验证 Agent 经 `agents.validator.mcp_servers` 引用，可用才调用。
 - `agents`：四个 Agent（creative / validator / controller / meta）各自通过 `provider` + `model` 指向注册表条目，可分别使用不同提供商、不同模型。
-- Agent 级公共参数：`temperature`（采样温度，creative 默认 0.8，validator/controller/meta 默认 0.3）、`max_tokens`（单次请求最大输出 token 数，creative/validator 默认 2048，controller/meta 默认 1024）、`timeout`（可选，单请求超时，设置后覆盖所属提供商值）；另有各 Agent 专属参数（creative 的 `num_candidates`，validator 的 `enable_web_search`/`web_sources`/`mcp_servers`，meta 的 `log_intermediate`）。
+- Agent 级公共参数：`temperature`（采样温度，creative 默认 0.8，validator/controller/meta 默认 0.3）、`max_tokens`（单次请求最大输出 token 数，默认 16384，面向本地推理的大输出预算；云端提供商上限较低时按需调低）、`timeout`（可选，单请求超时，设置后覆盖所属提供商值）；另有各 Agent 专属参数（creative 的 `num_candidates`，validator 的 `enable_web_search`/`web_sources`/`mcp_servers`，meta 的 `log_intermediate`）。
 - 参数优先级（从高到低）：请求内 `config`（仅运行时参数） > Agent 级 > 提供商级 > 内置默认值。
 - `enable_creative` / `enable_validator`：创意与验证 Agent 启用开关的全局默认值（均默认 true），请求体顶层可对当次调用覆盖；总控类 Agent（controller / meta）恒启用，无开关。
 - `admin_token`（可选）：管理令牌，设置后 PUT /api/config、POST /api/config/reset、GET /api/logs 要求 `X-Admin-Token` 请求头；/api/invoke 与 GET /api/config 恒开放。
@@ -220,13 +220,13 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
       "model": "deepseek-chat",
       "num_candidates": 3,
       "temperature": 0.8,
-      "max_tokens": 2048
+      "max_tokens": 16384
     },
     "validator": {
       "provider": "deepseek",
       "model": "deepseek-reasoner",
       "temperature": 0.3,
-      "max_tokens": 2048,
+      "max_tokens": 16384,
       "timeout": 300,
       "enable_web_search": false,
       "web_sources": ["wikipedia.org", "gov.cn", "edu.cn"],
@@ -236,13 +236,13 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
       "provider": "deepseek",
       "model": "deepseek-chat",
       "temperature": 0.3,
-      "max_tokens": 1024
+      "max_tokens": 16384
     },
     "meta": {
       "provider": "deepseek",
       "model": "deepseek-chat",
       "temperature": 0.3,
-      "max_tokens": 1024,
+      "max_tokens": 16384,
       "log_intermediate": true
     }
   }

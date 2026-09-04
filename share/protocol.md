@@ -115,7 +115,7 @@
 | `timeout` | integer | 单次调用（含全部循环轮次）超时秒数，范围 1~3600，默认 300 |
 | `agents.creative.num_candidates` | integer | 创意 Agent 每轮生成候选数量，范围 1~10，默认 3 |
 | `agents.<agent>.temperature` | float | 各 Agent 采样温度，范围 0~2；`<agent>` 可为 creative / validator / controller / meta，默认值分别为 0.8 / 0.3 / 0.3 / 0.3 |
-| `agents.<agent>.max_tokens` | integer | 各 Agent 单次请求最大输出 token 数，范围 256~32768；默认值 creative / validator 为 2048，controller / meta 为 1024 |
+| `agents.<agent>.max_tokens` | integer | 各 Agent 单次请求最大输出 token 数，范围 256~32768；默认 16384（面向本地推理的大输出预算；云端提供商输出上限较低时会拒绝过大的值，按需调低，如 deepseek-chat ≤8192） |
 | `agents.<agent>.timeout` | integer | 各 Agent 单次 LLM 请求超时秒数，范围 1~3600；默认未设置，使用所属提供商的 `timeout` |
 | `agents.validator.enable_web_search` | boolean | 是否允许验证 Agent 使用联网工具（MCP），默认 false |
 | `agents.validator.web_sources` | array of strings | 联网验证期望的权威域名（提示词参考），默认 `["wikipedia.org", "gov.cn", "edu.cn"]` |
@@ -292,13 +292,13 @@
         "model": "deepseek-chat",
         "num_candidates": 3,
         "temperature": 0.8,
-        "max_tokens": 2048
+        "max_tokens": 16384
       },
       "validator": {
         "provider": "deepseek",
         "model": "deepseek-reasoner",
         "temperature": 0.3,
-        "max_tokens": 2048,
+        "max_tokens": 16384,
         "timeout": 300,
         "enable_web_search": false,
         "web_sources": ["wikipedia.org", "gov.cn", "edu.cn"]
@@ -307,13 +307,13 @@
         "provider": "deepseek",
         "model": "deepseek-chat",
         "temperature": 0.3,
-        "max_tokens": 1024
+        "max_tokens": 16384
       },
       "meta": {
         "provider": "deepseek",
         "model": "deepseek-chat",
         "temperature": 0.3,
-        "max_tokens": 1024,
+        "max_tokens": 16384,
         "log_intermediate": true
       }
     }
@@ -326,7 +326,7 @@
 - `enable_creative` / `enable_validator` 为 Agent 启用开关的全局默认值，请求体顶层字段可对当次调用覆盖；总控类 Agent（controller / meta）恒启用，无开关。
 - `providers` 为 OpenAI 兼容提供商注册表，各 Agent 通过 `provider` + `model` 指向其一，可分别使用不同提供商与模型。
 - `mcp_servers` 为 MCP 服务器注册表（验证 Agent 联网工具），条目字段：`preset`（内置预设名，可选）或 `url`（直接给出 Streamable HTTP 端点）、`api_key`（预设需要密钥时填写）、`enabled`（默认 true）、`timeout`（单请求超时秒数，默认 60）、`allowed_tools`（工具白名单，留空 = 全部）、`allow_private`（默认 false，指向内网/回环地址时需显式放行）。Agent 经 `agents.validator.mcp_servers` 引用条目名。
-- 提供商字段：`base_url`（必填，仅接受 `http` / `https` scheme 且必须含主机名，如 `https://api.deepseek.com/v1`、`http://localhost:11434/v1`；`ftp://` 或缺 scheme 等无效地址返回 400 `CONFIG_VALIDATION_ERROR`。本地地址合法，不受 MCP 那套私网限制）、`models`（该提供商可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 120）。本地推理服务（Ollama、llama.cpp、LM Studio 等）同样经 OpenAI 兼容接口接入，推理较慢，建议按需放宽 `timeout`（如 600）；本地服务无需鉴权，`api_key` 可省略或填任意占位值。
+- 提供商字段：`base_url`（必填，仅接受 `http` / `https` scheme 且必须含主机名，如 `https://api.deepseek.com/v1`、`http://localhost:11434/v1`；`ftp://` 或缺 scheme 等无效地址返回 400 `CONFIG_VALIDATION_ERROR`。本地地址合法，不受 MCP 那套私网限制）、`models`（该提供商可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 300）。本地推理服务（Ollama、llama.cpp、LM Studio 等）同样经 OpenAI 兼容接口接入，推理较慢，建议按需放宽 `timeout`（如 600）；本地服务无需鉴权，`api_key` 可省略或填任意占位值。
 - `providers.<name>.api_key`、`mcp_servers.<name>.api_key` 与 `admin_token` 仅在 `PUT /api/config` 时写入，`GET /api/config` 不回显这些字段；但回显只读布尔：`providers.<name>.api_key_set`、`mcp_servers.<name>.api_key_set` 与顶层 `admin_token_set`（环境变量注入的密钥亦计为已设置），供控制面板展示 BYOK 配置状态。
 
 ---
@@ -398,7 +398,7 @@
 
 **端点**：`GET /api/logs?limit=20&offset=0`
 
-**功能**：获取最近的调用记录摘要，用于控制面板展示。
+**功能**：获取最近的调用记录摘要，用于控制面板展示。调用日志永久留存（JSONL 追加式落盘，不设上限、不裁剪），`total` 为历史累计总数。
 
 **查询参数**：
 
@@ -493,7 +493,7 @@
   2. Agent 级参数（`agents.<name>` 的 temperature、max_tokens、timeout 及各 Agent 专属参数）
   3. 提供商级参数（`providers.<name>` 的 timeout 等）
   4. 内置默认值
-- Agent 级 `timeout` 未设置时，使用所属提供商的 `timeout`；提供商也未设置时，使用默认值 120。
+- Agent 级 `timeout` 未设置时，使用所属提供商的 `timeout`；提供商也未设置时，使用默认值 300。
 - 模型与提供商路由（`agents.<name>` 的 provider、model）为全局配置，不接受请求内覆盖。
 - `enable_creative` / `enable_validator` 的全局默认值通过 `PUT /api/config` 持久化；请求体顶层同名开关仅对当次调用有效，未提供时使用全局默认值。
 - 请求体中的 `config` 字段仅对当次调用有效，不会持久化。
@@ -509,7 +509,7 @@
 - 超时分为三层，各司其职：
   - **全局 `timeout`**（默认 300 秒）：单次调用（含全部循环轮次）的总时长限制。
   - **Agent 级 `agents.<name>.timeout`**（可选）：该 Agent 单次 LLM 请求超时，设置后覆盖提供商值。
-  - **提供商级 `providers.<name>.timeout`**（默认 120 秒）：该提供商下单次 LLM 请求超时，Agent 级未设置时生效。
+  - **提供商级 `providers.<name>.timeout`**（默认 300 秒）：该提供商下单次 LLM 请求超时，Agent 级未设置时生效。
 - 全局 `timeout` 由服务端强制执行（对整次调用计时，超时即掐断进行中的 LLM 请求）：若已至少完成一轮迭代（有可用的结果——完整循环中为验证判定，长链持续思考中为本轮思考要点），返回成功响应并置 `termination_reason` 为 `timeout`；若一轮都未完成（无可返回的结果），返回错误 `TIMEOUT`。
 - 单次 LLM 请求超时视为该请求失败，触发一次重试，仍失败则该轮降级为 `fail` 判定（与输出解析失败同路径处理）。
 - 使用本地模型时应保证 全局 timeout ≥ 单请求 timeout × 预计请求数，否则调用会在模型完成前被整体掐断。
@@ -525,6 +525,7 @@
 
 ## 6. 变更记录
 
+- alpha-6（2026-09-04，内部迭代）：调用日志改为永久留存（JSONL 只追加，移除原 5000 条上限裁剪与文件重写，历史记录不再丢失）；提供商 `timeout` 默认由 120 秒放宽至 300 秒（本地推理服务单次生成常超 120 秒，原默认配"重试一次"会以 240 秒 INTERNAL_ERROR 收场）；四个 Agent `max_tokens` 默认统一为 16384（原 creative / validator 2048、controller / meta 1024；云端提供商输出上限较低时按需调低）。
 - alpha-5（2026-09-02，内部迭代）：`PUT /api/config` 深度合并改为遵循 JSON Merge Patch（RFC 7386）语义——值为 `null` 的键表示删除，修复注册表条目无法删除的缺陷（此前仅在 payload 中省略 `providers.<name>` / `mcp_servers.<name>` 会被旧配置深合并复活，控制面板删除后服务端仍保留）；`providers.<name>.base_url` 新增 scheme 校验（仅 `http` / `https` 且必须含主机名，此前 `ftp://`、缺 scheme 等无效地址被静默接受，直到实际调用才报错）；控制面板新增提供商时前置校验 `base_url`、未保存条目显示「未保存」标记，对未保存提供商点击「拉取模型」改为引导「保存并拉取」，不再直接返回 404「提供商不存在」。
 - alpha-4（2026-08-31，内部迭代）：`GET /api/config` 回显只读布尔 `providers.<name>.api_key_set` / `mcp_servers.<name>.api_key_set` / 顶层 `admin_token_set`（不回显密钥内容，环境变量注入亦计入）；新增 `GET /api/providers/{name}/models` 模型发现端点（代理 OpenAI 兼容 `GET /models`，填充 `providers.<name>.models`；admin_token 设置时需 `X-Admin-Token`，新增 502 `PROVIDER_ERROR` 与 404 `NOT_FOUND` 错误路径）。
 - alpha-3（2026-08-31，内部迭代）：总控 Agent 拆分为 controller（长链思考产成者）与新增的 meta Agent（完整循环的检查与管理，输出 decision / next_direction，`log_intermediate` 归属 meta）；`intermediate_log` 键名由 `controller_reflection` 改为 `meta_reflection`；新增输入护栏（user_query / candidate ≤20000 字符，context_summary ≤300000 字符，evidence ≤100 条 × ≤20000 字符）；新增 `lock_invoke` 开关（默认 false，开启后 invoke 需 `X-Admin-Token`）；密钥支持环境变量注入（`BTCM_ADMIN_TOKEN` / `BTCM_PROVIDER_<NAME>_API_KEY` / `BTCM_MCP_<NAME>_API_KEY`，优先于配置文件、不回写不回显）；MCP 服务器新增 `allow_private`（默认 false）与仅允许 http/https scheme 的校验；生产环境抬升 httpx 日志级别以防请求 URL 泄漏密钥。
