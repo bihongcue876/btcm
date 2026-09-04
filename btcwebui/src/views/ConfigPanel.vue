@@ -11,7 +11,7 @@ const submitting = ref(false)
 
 const cfg = reactive<GlobalConfig>({
   max_iterations: 2,
-  timeout: 300,
+  timeout: 3600,
   enable_creative: true,
   enable_validator: true,
   lock_invoke: false,
@@ -249,7 +249,7 @@ function addProvider() {
   cfg.providers[name] = {
     base_url: baseUrl,
     models: [],
-    timeout: 300,
+    timeout: 600,
     enabled: true,
     options: {},
   }
@@ -443,7 +443,7 @@ async function save() {
     const payload = JSON.parse(JSON.stringify(cfg)) as GlobalConfig
     for (const name of providerNames.value) {
       if (payload.providers[name].timeout == null) {
-        payload.providers[name].timeout = 300
+        payload.providers[name].timeout = 600
       }
       if (payload.providers[name].enabled == null) {
         payload.providers[name].enabled = true
@@ -816,7 +816,7 @@ onMounted(load)
                 :min="1"
                 :max="3600"
                 style="width: 100%"
-                @update:value="(v: number | null) => (cfg.providers[name].timeout = v ?? 300)"
+                @update:value="(v: number | null) => (cfg.providers[name].timeout = v ?? 600)"
               />
             </n-form-item-gi>
             <n-form-item-gi label="models（回车添加标签）" label-placement="top" style="margin-bottom: 12px">

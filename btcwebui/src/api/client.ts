@@ -6,6 +6,7 @@ import type {
   InvokeData,
   InvokePayload,
   LogsData,
+  StreamEvent,
 } from '@/types'
 
 export class ApiError extends Error {
@@ -103,6 +104,93 @@ export const api = {
       http.get(`/providers/${encodeURIComponent(name)}/models`),
     ).then((d) => d.models)
   },
+}
+
+// ---------- 流式调用（SSE：EventSource 不支持 POST，用 fetch 手解） ----------
+
+export interface StreamHandlers {
+  onEvent: (event: StreamEvent) => void
+  /** 正常结束：body 与 /invoke 响应同构 */
+  onDone: (body: ApiResponse<InvokeData>) => void
+  /** 服务端执行失败：body.error 携带错误码与信息 */
+  onError: (body: ApiResponse<InvokeData>) => void
+}
+
+export async function invokeStream(
+  payload: InvokePayload,
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  let resp: Response
+  try {
+    resp = await fetch('/api/invoke/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        ...(getAdminToken() ? { 'X-Admin-Token': getAdminToken() } : {}),
+      },
+      body: JSON.stringify(payload),
+      signal,
+    })
+  } catch (e) {
+    throw new ApiError('NETWORK_ERROR', `网络请求失败：${(e as Error).message}`)
+  }
+  if (!resp.ok || !resp.body) {
+    // 流开始前的校验失败（鉴权/缺 candidate/限流）返回普通 JSON 错误
+    let body: ApiResponse<InvokeData> | null = null
+    try {
+      body = await resp.json()
+    } catch {
+      // 非 JSON 响应体，忽略
+    }
+    if (body?.error) throw new ApiError(body.error.code, body.error.message)
+    throw new ApiError('NETWORK_ERROR', `流式请求失败（HTTP ${resp.status}）`)
+  }
+
+  let finished = false
+  const handleFrame = (frame: string) => {
+    let name = 'message'
+    const dataLines: string[] = []
+    for (const line of frame.split('\n')) {
+      if (line.startsWith('event: ')) name = line.slice(7)
+      else if (line.startsWith('data: ')) dataLines.push(line.slice(6))
+    }
+    if (!dataLines.length) return
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(dataLines.join('\n'))
+    } catch {
+      return
+    }
+    if (name === 'done') {
+      finished = true
+      handlers.onDone(parsed as ApiResponse<InvokeData>)
+    } else if (name === 'error') {
+      finished = true
+      handlers.onError(parsed as ApiResponse<InvokeData>)
+    } else {
+      handlers.onEvent(parsed as StreamEvent)
+    }
+  }
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+      if (frame.trim()) handleFrame(frame)
+    }
+  }
+  if (!finished) {
+    throw new ApiError('STREAM_INTERRUPTED', '流式连接中断，未收到完整结果')
+  }
 }
 
 export default http

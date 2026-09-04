@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import type { InvokePayload } from '@/types'
 
@@ -17,9 +17,21 @@ const form = reactive({
   candidate: '',
   evidenceText: '',
   context_summary: '',
+  /** 思考深度：0 略想 / 1 通用 / 2 深层 */
+  effort: 1,
   max_iterations: null as number | null,
   timeout: null as number | null,
 })
+
+const EFFORT_VALUES = ['light', 'standard', 'deep'] as const
+
+const EFFORT_HINTS: Record<number, string> = {
+  0: '略想：单轮快速出结果，不展开深思',
+  1: '通用：按全局配置的正常循环深度',
+  2: '深层：充分深思，多角度检验逻辑与事实',
+}
+
+const effortHint = computed(() => EFFORT_HINTS[form.effort] ?? '')
 
 const showAdvanced = ref(false)
 const submitting = ref(false)
@@ -42,6 +54,7 @@ async function handleSubmit() {
     user_query: form.user_query.trim(),
     enable_creative: props.creative,
     enable_validator: props.validator,
+    effort: EFFORT_VALUES[form.effort],
   }
   // 完整循环/纯验证下候选为可选输入（完整循环作为首轮候选）；纯创意不发送
   if (props.validator && form.candidate.trim()) payload.candidate = form.candidate.trim()
@@ -111,6 +124,19 @@ defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
         />
       </n-form-item>
 
+      <n-form-item label="思考深度">
+        <div class="effort">
+          <n-slider
+            v-model:value="form.effort"
+            :min="0"
+            :max="2"
+            :step="1"
+            :marks="{ 0: '略想', 1: '通用', 2: '深层' }"
+          />
+          <div class="effort-hint">{{ effortHint }}</div>
+        </div>
+      </n-form-item>
+
       <n-form-item label="高级参数">
         <n-collapse-transition :show="showAdvanced">
           <div class="advanced">
@@ -152,6 +178,15 @@ defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
   display: flex;
   gap: 12px;
   margin-bottom: 8px;
+}
+.effort {
+  width: 100%;
+  padding: 0 8px;
+}
+.effort-hint {
+  margin-top: 22px;
+  font-size: 12px;
+  color: #6b7280;
 }
 .submit-hint {
   margin-left: 12px;

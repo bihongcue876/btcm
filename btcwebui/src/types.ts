@@ -34,6 +34,7 @@ export interface AgentConfig {
   web_sources?: string[]
   mcp_servers?: string[]
   log_intermediate?: boolean
+  options?: Record<string, unknown>
 }
 
 export interface GlobalConfig {
@@ -78,6 +79,8 @@ export interface InvokePayload {
   context_summary?: string | null
   enable_creative?: boolean | null
   enable_validator?: boolean | null
+  /** 思考深度：light 略想 / standard 通用（默认）/ deep 深层 */
+  effort?: 'light' | 'standard' | 'deep' | null
   config?: RuntimeConfig | null
 }
 
@@ -112,7 +115,11 @@ export interface HybridIntermediateEntry {
   iteration: number
   creative_output?: string[]
   validator_output?: ValidatorOutput
-  meta_reflection?: { decision?: string; next_direction?: string }
+  meta_reflection?: {
+    decision?: string
+    next_direction?: string
+    remaining_iterations?: number
+  }
 }
 
 export interface LongChainIntermediateEntry {
@@ -178,4 +185,59 @@ export interface HealthData {
   status: string
   version: string
   uptime_s: number
+}
+
+// ---------- invoke/stream（SSE 事件） ----------
+
+export type StreamAgentName = 'creative' | 'validator' | 'meta' | 'controller'
+
+export interface StreamStartEvent {
+  type: 'start'
+  request_id: string
+  enable_creative: boolean
+  enable_validator: boolean
+}
+
+export interface StreamAgentStartEvent {
+  type: 'agent_start'
+  agent: StreamAgentName
+  iteration: number | string
+}
+
+export interface StreamDeltaEvent {
+  type: 'delta'
+  agent: StreamAgentName
+  /** reasoning：思考过程；content：正式输出 */
+  kind: 'reasoning' | 'content'
+  text: string
+}
+
+export interface StreamAgentDoneEvent {
+  type: 'agent_done'
+  agent: StreamAgentName
+  iteration: number | string
+}
+
+export interface StreamIterationDoneEvent {
+  type: 'iteration_done'
+  iteration: number
+  verdict?: string
+  decision?: string
+}
+
+export type StreamEvent =
+  | StreamStartEvent
+  | StreamAgentStartEvent
+  | StreamDeltaEvent
+  | StreamAgentDoneEvent
+  | StreamIterationDoneEvent
+
+/** 前端流式面板的一个 Agent 块：一次 agent_start 到 agent_done 之间的聚合 */
+export interface StreamBlock {
+  id: string
+  agent: StreamAgentName
+  iteration: number | string
+  reasoning: string
+  content: string
+  done: boolean
 }
