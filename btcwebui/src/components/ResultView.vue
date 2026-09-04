@@ -44,6 +44,10 @@ const logEntries = computed(() =>
 )
 const logType = computed(() => (longChain.value ? ('longchain' as const) : ('hybrid' as const)))
 const usage = computed<Usage | null>(() => props.data?.usage ?? null)
+// 用户主动中止：不算失败，用 warning 语义展示
+const errorType = computed(() =>
+  props.error?.code === 'ABORTED' ? ('warning' as const) : ('error' as const),
+)
 </script>
 
 <template>
@@ -53,12 +57,15 @@ const usage = computed<Usage | null>(() => props.data?.usage ?? null)
         <span class="waiting-dot"></span>
         思考中，已耗时
         <b class="waiting-time n-num">{{ formatDurationMs(elapsedMs ?? 0) }}</b>
-        <span class="waiting-note">（多轮生成-验证-反思可能需要数十秒，请耐心等待）</span>
+        <span class="waiting-note">（多轮生成-验证-反思可能需要数十秒，可随时点击左侧「中止」）</span>
       </div>
 
-      <n-alert v-if="error" type="error" :show-icon="true">
+      <n-alert v-if="error" :type="errorType" :show-icon="true">
         <template #header>
           <code>{{ error.code }}</code>
+          <span v-if="error.code === 'ABORTED' && durationMs != null" class="abort-dur">
+            · 已运行 {{ formatDurationMs(durationMs) }}
+          </span>
         </template>
         {{ error.message }}
       </n-alert>
@@ -228,6 +235,13 @@ const usage = computed<Usage | null>(() => props.data?.usage ?? null)
 .waiting-note {
   font-size: 12px;
   color: #6b7280;
+}
+.abort-dur {
+  margin-left: 6px;
+  font-size: 12px;
+  font-weight: 400;
+  color: #f6ad55;
+  font-variant-numeric: tabular-nums;
 }
 .meta {
   display: flex;

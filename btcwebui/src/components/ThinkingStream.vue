@@ -2,7 +2,11 @@
 import { nextTick, ref, watch } from 'vue'
 import type { StreamAgentName, StreamBlock } from '@/types'
 
-const props = defineProps<{ blocks: StreamBlock[] }>()
+const props = defineProps<{
+  blocks: StreamBlock[]
+  /** 调用进行中：进行中的块显示脉冲动画；中止/结束后静止 */
+  active?: boolean
+}>()
 
 const AGENT_LABELS: Record<StreamAgentName, string> = {
   creative: '创意',
@@ -56,7 +60,10 @@ watch(
           <span class="block-label">
             {{ block.iteration === 'finalize' ? '整合' : `第 ${block.iteration} 轮` }}
           </span>
-          <span v-if="!block.done" class="pulse" aria-hidden="true"></span>
+          <span v-if="!block.done && props.active" class="pulse" aria-hidden="true"></span>
+          <span v-else-if="!block.done && !props.active" class="halted" aria-hidden="true">
+            已停止
+          </span>
           <span class="chevron" :class="{ open: !isCollapsed(block) }">▾</span>
         </button>
         <div v-show="!isCollapsed(block)" class="block-body">
@@ -88,6 +95,9 @@ watch(
   border: 1px solid #2a2f3a;
   border-radius: 6px;
   overflow: hidden;
+  /* flex 子项默认可压缩：超长内容会被压扁并由 overflow:hidden 掩盖，
+     固定高度让容器滚动条接管 */
+  flex: none;
 }
 .block.done {
   opacity: 0.85;
@@ -131,6 +141,13 @@ watch(
   border-radius: 50%;
   background: #4b9e5f;
   animation: pulse 1.2s ease-in-out infinite;
+}
+.halted {
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #f0a4a4;
+  background: rgba(248, 113, 113, 0.12);
 }
 @keyframes pulse {
   0%, 100% { opacity: 1; }

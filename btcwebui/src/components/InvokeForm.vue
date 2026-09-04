@@ -6,9 +6,12 @@ import type { InvokePayload } from '@/types'
 const props = defineProps<{
   creative: boolean
   validator: boolean
+  /** 调用进行中：发起按钮转 loading，并显示中止按钮 */
+  running: boolean
 }>()
 const emit = defineEmits<{
   submit: [payload: InvokePayload]
+  abort: []
 }>()
 const message = useMessage()
 
@@ -34,7 +37,6 @@ const EFFORT_HINTS: Record<number, string> = {
 const effortHint = computed(() => EFFORT_HINTS[form.effort] ?? '')
 
 const showAdvanced = ref(false)
-const submitting = ref(false)
 
 async function handleSubmit() {
   if (!form.user_query.trim()) {
@@ -74,8 +76,6 @@ function onQueryKeydown(e: KeyboardEvent) {
     handleSubmit()
   }
 }
-
-defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
 </script>
 
 <template>
@@ -143,7 +143,6 @@ defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
             <n-input-number
               v-model:value="form.max_iterations"
               :min="1"
-              :max="10"
               placeholder="轮数上限"
             >
               <template #prefix>轮数</template>
@@ -151,7 +150,6 @@ defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
             <n-input-number
               v-model:value="form.timeout"
               :min="1"
-              :max="3600"
               placeholder="超时秒数"
             >
               <template #prefix>超时</template>
@@ -164,16 +162,70 @@ defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
       </n-form-item>
 
       <n-form-item label=" ">
-        <n-button type="primary" size="large" :loading="submitting" @click="handleSubmit">
-          发起调用
-        </n-button>
-        <span class="submit-hint">Ctrl+Enter 快速提交</span>
+        <div class="submit-row">
+          <n-button
+            type="primary"
+            size="large"
+            class="submit-btn"
+            :loading="props.running"
+            @click="handleSubmit"
+          >
+            发起调用
+          </n-button>
+          <transition name="abort-fade">
+            <n-button
+              v-if="props.running"
+              type="error"
+              size="large"
+              secondary
+              class="abort-btn"
+              @click="emit('abort')"
+            >
+              <template #icon>
+                <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                  <rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" />
+                </svg>
+              </template>
+              中止
+            </n-button>
+          </transition>
+          <span class="submit-hint">
+            {{ props.running ? '中止后可修改输入重新发起' : 'Ctrl+Enter 快速提交' }}
+          </span>
+        </div>
       </n-form-item>
     </n-form>
   </n-card>
 </template>
 
 <style scoped>
+.submit-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.submit-btn {
+  min-width: 124px;
+}
+.abort-btn {
+  transition: box-shadow 0.2s, transform 0.15s;
+}
+.abort-btn:hover {
+  box-shadow: 0 0 14px rgba(248, 113, 113, 0.35);
+}
+.abort-btn:active {
+  transform: translateY(1px);
+}
+.abort-fade-enter-active,
+.abort-fade-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.abort-fade-enter-from,
+.abort-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-6px);
+}
 .advanced {
   display: flex;
   gap: 12px;
@@ -189,7 +241,6 @@ defineExpose({ setSubmitting: (v: boolean) => (submitting.value = v) })
   color: #6b7280;
 }
 .submit-hint {
-  margin-left: 12px;
   font-size: 12px;
   color: #6b7280;
 }
