@@ -59,6 +59,11 @@ MCP_PRESETS: dict[str, dict] = {
         "needs_key": False,
         "desc": "网页抓取",
     },
+    "duckduckgo": {
+        "url": "http://127.0.0.1:7070/mcp",
+        "needs_key": False,
+        "desc": "DuckDuckGo 搜索（本地 MCP 服务，免密钥，由后端自动拉起）",
+    },
 }
 
 # 各 Agent 的默认温度与最大输出 token（creative 0.8/2048，validator 0.3/2048，controller 0.3/1024，meta 0.3/1024）

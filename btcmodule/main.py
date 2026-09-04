@@ -11,8 +11,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import socket
+import subprocess
+import sys
+import threading
+import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
@@ -29,6 +36,147 @@ from btcmodule.core.loop import Engine
 from btcmodule.core.result import ErrorInfo, fail
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+logger = logging.getLogger("btcmodule.main")
+
+# duckduckgo 预设的本地 MCP 子进程参数：
+# uvx 拉起 duckduckgo-mcp-server（含 browser extra，curl_cffi 用于
+# Chrome TLS 伪装以绕过 DuckDuckGo 的指纹拦截），streamable-http 传输
+DDG_MCP_ARGS = [
+    "--from",
+    "duckduckgo-mcp-server[browser]",
+    "duckduckgo-mcp-server",
+    "--transport",
+    "streamable-http",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "7070",
+]
+
+# 端口就绪探测：uvx 首次运行需解析并拉取包，给足等待时间
+DDG_READY_TIMEOUT_S = 60
+
+
+def _spawn_ddg_sync() -> subprocess.Popen | None:
+    """在工作线程中同步拉起 duckduckgo MCP 并等待端口就绪。
+
+    不用 asyncio.create_subprocess_exec：uvicorn --reload 在 Windows 上
+    使用 SelectorEventLoop，该循环不支持异步子进程（NotImplementedError）。
+    同步 Popen + socket 探活与事件循环类型无关。
+    """
+    try:
+        proc = subprocess.Popen(
+            ["uvx", *DDG_MCP_ARGS],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as e:
+        logger.warning("无法拉起 duckduckgo MCP 子进程（%s），检索验证将降级纯逻辑", e)
+        return None
+    deadline = time.monotonic() + DDG_READY_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            logger.warning(
+                "duckduckgo MCP 子进程提前退出（code=%s），检索验证将降级纯逻辑",
+                proc.returncode,
+            )
+            return None
+        try:
+            with socket.create_connection(("127.0.0.1", 7070), timeout=1):
+                pass
+            logger.info("duckduckgo MCP 本地服务已就绪（127.0.0.1:7070）")
+            return proc
+        except OSError:
+            time.sleep(1)
+    logger.warning("duckduckgo MCP 本地服务启动超时，检索验证将降级纯逻辑")
+    _kill_tree(proc)
+    return None
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """按进程树终止（Windows 下杀父进程不杀子进程，须 taskkill /T）。"""
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True,
+            check=False,
+        )
+    else:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+class DdgMcpSupervisor:
+    """duckduckgo 本地 MCP 子进程的运行时管理：启停跟随配置变更。
+
+    lifespan 启动时拉起；运行中 PUT /api/config 启用/停用预设条目时，
+    经 ConfigManager 变更回调动态拉起/终止，无需重启进程。
+    回调在配置锁内同步执行，故启停动作全部甩到后台线程。
+    """
+
+    def __init__(self, cm: ConfigManager) -> None:
+        self._cm = cm
+        self._proc: subprocess.Popen | None = None
+        self._lock = threading.Lock()
+        cm.add_change_listener(self._on_config_change)
+
+    def _enabled(self) -> bool:
+        return any(
+            srv.enabled and srv.preset == "duckduckgo"
+            for srv in self._cm.config.mcp_servers.values()
+        )
+
+    def _running(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _on_config_change(self) -> None:
+        """配置变更回调：后台线程执行启停，不阻塞配置更新。"""
+        want, have = self._enabled(), self._running()
+        if want and not have:
+            threading.Thread(target=self.start, daemon=True).start()
+        elif not want and have:
+            threading.Thread(target=self.stop, daemon=True).start()
+
+    def start(self) -> None:
+        """确保子进程在运行（已运行则跳过）。"""
+        with self._lock:
+            if self._running():
+                return
+            proc = _spawn_ddg_sync()
+            if proc is not None:
+                self._proc = proc
+
+    def stop(self) -> None:
+        """终止子进程（幂等）。"""
+        with self._lock:
+            proc, self._proc = self._proc, None
+        if proc is not None:
+            _kill_tree(proc)
+
+    def startup(self) -> None:
+        """进程启动时的初始拉起（配置启用时）。"""
+        if self._enabled():
+            self.start()
+
+    def shutdown(self) -> None:
+        """进程退出时的清理。"""
+        self.stop()
+
+
+@asynccontextmanager
+async def _lifespan(cm: ConfigManager):
+    supervisor = DdgMcpSupervisor(cm)
+    await asyncio.to_thread(supervisor.startup)
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(supervisor.shutdown)
 
 
 def create_app(
@@ -56,6 +204,7 @@ def create_app(
         title="BTCM",
         description="副思考链模块（Beside-Thinking Chain Module）",
         version="0.0.0",
+        lifespan=lambda _app: _lifespan(cm),
     )
     app.state.config_manager = cm
     app.state.engine = engine

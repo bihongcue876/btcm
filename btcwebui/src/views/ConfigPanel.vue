@@ -64,7 +64,11 @@ const MCP_PRESET_OPTIONS = [
   { value: 'exa', label: 'exa · Exa 搜索（需 api_key）' },
   { value: 'deepwiki', label: 'deepwiki · 开源仓库文档（免密）' },
   { value: 'fetch', label: 'fetch · 网页抓取（免密）' },
+  { value: 'duckduckgo', label: 'duckduckgo · DuckDuckGo 搜索（本地服务，免密）' },
 ]
+
+// 指向本地回环地址的预设：创建条目时默认放行（否则后端私网校验会拒绝）
+const MCP_PRESETS_LOCAL = ['duckduckgo']
 
 // 内置 MCP 预设中需要 api_key 的（与服务端 MCP_PRESETS 的 needs_key 对应）
 const MCP_PRESETS_NEED_KEY = ['tavily', 'exa']
@@ -355,7 +359,13 @@ function addMcpServer() {
     return
   }
   const entry: MCPServerConfig = newMcpPreset.value
-    ? { preset: newMcpPreset.value, enabled: true, timeout: 60, allowed_tools: [] }
+    ? {
+        preset: newMcpPreset.value,
+        enabled: true,
+        timeout: 60,
+        allowed_tools: [],
+        ...(MCP_PRESETS_LOCAL.includes(newMcpPreset.value) ? { allow_private: true } : {}),
+      }
     : {
         url: newMcpUrl.value.trim() || 'https://example.com/mcp',
         enabled: true,
@@ -631,7 +641,6 @@ onMounted(load)
             <n-input-number
               :value="cfg.max_iterations"
               :min="1"
-              :max="10"
               style="width: 100%"
               @update:value="(v: number | null) => { if (v != null) cfg.max_iterations = v }"
             />
@@ -640,7 +649,6 @@ onMounted(load)
             <n-input-number
               :value="cfg.timeout"
               :min="1"
-              :max="3600"
               style="width: 100%"
               @update:value="(v: number | null) => { if (v != null) cfg.timeout = v }"
             />
@@ -814,7 +822,6 @@ onMounted(load)
               <n-input-number
                 :value="cfg.providers[name].timeout"
                 :min="1"
-                :max="3600"
                 style="width: 100%"
                 @update:value="(v: number | null) => (cfg.providers[name].timeout = v ?? 600)"
               />
@@ -822,7 +829,6 @@ onMounted(load)
             <n-form-item-gi label="models（回车添加标签）" label-placement="top" style="margin-bottom: 12px">
               <n-dynamic-tags
                 v-model:value="cfg.providers[name].models"
-                :max="20"
                 style="width: 100%"
               />
             </n-form-item-gi>
@@ -948,7 +954,6 @@ onMounted(load)
               <n-input-number
                 :value="cfg.mcp_servers[name].timeout ?? 60"
                 :min="1"
-                :max="600"
                 style="width: 100%"
                 @update:value="(v: number | null) => (cfg.mcp_servers[name].timeout = v ?? 60)"
               />
@@ -968,7 +973,6 @@ onMounted(load)
             <n-form-item-gi label="allowed_tools（留空 = 全部）" label-placement="top" style="margin-bottom: 12px">
               <n-dynamic-tags
                 :value="cfg.mcp_servers[name].allowed_tools ?? []"
-                :max="20"
                 style="width: 100%"
                 @update:value="(v: string[]) => (cfg.mcp_servers[name].allowed_tools = v)"
               />
@@ -1078,7 +1082,6 @@ onMounted(load)
               <n-input-number
                 :value="cfg.agents[name].max_tokens"
                 :min="256"
-                :max="32768"
                 style="width: 100%"
                 @update:value="(v: number | null) => { if (v != null) (cfg.agents[name].max_tokens = v) }"
               />
@@ -1087,7 +1090,6 @@ onMounted(load)
               <n-input-number
                 :value="cfg.agents[name].timeout ?? null"
                 :min="1"
-                :max="3600"
                 style="width: 100%"
                 clearable
                 @update:value="(v: number | null) => (cfg.agents[name].timeout = v ?? null)"
@@ -1098,7 +1100,6 @@ onMounted(load)
               <n-input-number
                 :value="cfg.agents[name].num_candidates"
                 :min="1"
-                :max="10"
                 style="width: 100%"
                 @update:value="(v: number | null) => { if (v != null) (cfg.agents[name].num_candidates = v) }"
               />
@@ -1111,7 +1112,6 @@ onMounted(load)
               <n-form-item-gi label="web_sources（回车添加标签）" label-placement="top" style="margin-bottom: 12px">
                 <n-dynamic-tags
                   v-model:value="cfg.agents[name].web_sources"
-                  :max="20"
                   style="width: 100%"
                 />
               </n-form-item-gi>
