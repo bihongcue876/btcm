@@ -171,10 +171,10 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 
 模型管理采用提供商注册表 + 按 Agent 路由（借鉴 DPIM 的 BYOK 模式独立实现）：
 
-- `providers`：注册多个 OpenAI 兼容提供商，各含 `base_url`、`api_key`、`models`（可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 300）。
+- `providers`：注册多个 OpenAI 兼容提供商，各含 `base_url`、`api_key`、`models`（可用模型列表）、`timeout`（可选，单次 LLM 请求超时秒数，默认 600）、`options`（可选，模型私有参数，透传进请求）。
 - `mcp_servers`：MCP 服务器注册表（Streamable HTTP），条目含 `preset`（内置预设 tavily/exa/deepwiki/fetch）或 `url`、`api_key`、`enabled`、`timeout`（默认 60）、`allowed_tools`（工具白名单）、`allow_private`（默认 false，指向内网/回环地址需显式放行，且 URL 仅允许 http/https）；验证 Agent 经 `agents.validator.mcp_servers` 引用，可用才调用。
 - `agents`：四个 Agent（creative / validator / controller / meta）各自通过 `provider` + `model` 指向注册表条目，可分别使用不同提供商、不同模型。
-- Agent 级公共参数：`temperature`（采样温度，creative 默认 0.8，validator/controller/meta 默认 0.3）、`max_tokens`（单次请求最大输出 token 数，默认 16384，面向本地推理的大输出预算；云端提供商上限较低时按需调低）、`timeout`（可选，单请求超时，设置后覆盖所属提供商值）；另有各 Agent 专属参数（creative 的 `num_candidates`，validator 的 `enable_web_search`/`web_sources`/`mcp_servers`，meta 的 `log_intermediate`）。
+- Agent 级公共参数：`temperature`（采样温度，creative 默认 0.8，validator/controller/meta 默认 0.3）、`max_tokens`（单次请求最大输出 token 数，默认 16384，面向本地推理的大输出预算；云端提供商上限较低时按需调低）、`timeout`（可选，单请求超时，设置后覆盖所属提供商值）、`options`（可选，模型私有参数，Agent 级覆盖提供商级）；另有各 Agent 专属参数（creative 的 `num_candidates`，validator 的 `enable_web_search`/`web_sources`/`mcp_servers`，meta 的 `log_intermediate`）。
 - 参数优先级（从高到低）：请求内 `config`（仅运行时参数） > Agent 级 > 提供商级 > 内置默认值。
 - `enable_creative` / `enable_validator`：创意与验证 Agent 启用开关的全局默认值（均默认 true），请求体顶层可对当次调用覆盖；总控类 Agent（controller / meta）恒启用，无开关。
 - `admin_token`（可选）：管理令牌，设置后 PUT /api/config、POST /api/config/reset、GET /api/logs 要求 `X-Admin-Token` 请求头；/api/invoke 与 GET /api/config 恒开放。
@@ -187,7 +187,7 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 ```json
 {
   "max_iterations": 2,
-  "timeout": 300,
+  "timeout": 3600,
   "enable_creative": true,
   "enable_validator": true,
   "admin_token": null,
@@ -227,7 +227,7 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
       "model": "deepseek-reasoner",
       "temperature": 0.3,
       "max_tokens": 16384,
-      "timeout": 300,
+      "timeout": 600,
       "enable_web_search": false,
       "web_sources": ["wikipedia.org", "gov.cn", "edu.cn"],
       "mcp_servers": []
@@ -249,7 +249,7 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 }
 ```
 
-模型网关（`core/llm.py`）按 Agent 角色解析提供商配置并缓存客户端，按生效参数（优先级解析后的 temperature、max_tokens、单请求超时）下发每次调用；请求内 `config` 仅可覆盖运行时参数（max_iterations、全局 timeout、候选数、温度、token 上限、单请求超时、联网开关），不可变更模型路由；Agent 启用开关（`enable_creative` / `enable_validator`）为请求体顶层字段，不受 `config` 约束。
+模型网关（`core/llm.py`）按 Agent 角色解析提供商配置并缓存客户端，按生效参数（优先级解析后的 temperature、max_tokens、单请求超时）下发每次调用；模型私有参数 `options` 经 OpenAI SDK `extra_body` 合并进请求体顶层透传；SSE 流式调用时模型输出以增量前传给前端；请求内 `config` 仅可覆盖运行时参数（max_iterations、全局 timeout、候选数、温度、token 上限、单请求超时、联网开关），不可变更模型路由；Agent 启用开关（`enable_creative` / `enable_validator`）与思考深度（`effort`）为请求体顶层字段，不受 `config` 约束。
 
 ### 4.5 API 设计
 
@@ -272,12 +272,15 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
   "context_summary": "上下文摘要（可选）",
   "enable_creative": true,               // 可选，默认 true；与 enable_validator 组合决定运行形态
   "enable_validator": true,              // 可选，默认 true
+  "effort": "standard",                  // 可选，思考深度三档：light（略想）/ standard（通用）/ deep（深层）
   "config": {                            // 可选，覆盖默认配置（仅运行时参数）
     "max_iterations": 2,
     "agents": { "validator": { "enable_web_search": true } }
   }
 }
 ```
+
+`effort` 三档：`light`（略想）强制单轮并注入快速思考提示词，对本地推理服务（llama.cpp/vLLM）额外关闭模型思考开关，追求最短路径出结果；`standard` 为默认行为；`deep`（深层）注入充分深思的提示词。深度分级仅作用于提示词与轮次，不改变响应结构。
 
 响应体（JSON，统一外层结构，`data` 按运行形态分化，完整字段定义以 `share/protocol.md` 为准）。以完整循环为例：
 
@@ -300,6 +303,12 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 ```
 
 纯创意形态下 `data` 不含 `verdict` 等验证字段，改为返回 `candidates`（候选列表）与 `conclusion`；长链持续思考形态下仅返回 `conclusion` 与 `intermediate_log`（每轮思考要点），无验证字段。
+
+#### 4.5.1.1 流式调用
+
+- **POST** `/api/invoke/stream`
+
+请求体与 `/api/invoke` 一致；响应为 `text/event-stream`（SSE），增量推送各 Agent 的思考与输出过程，结束时以 `done` 事件返回与 `/api/invoke` 同构的完整结果。校验失败（400/401/429）返回普通 JSON。事件定义与示例以 `share/protocol.md` 2.1.4 为准。
 
 #### 4.5.2 获取当前配置
 

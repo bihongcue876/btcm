@@ -72,6 +72,7 @@
   "context_summary": "用户预算 5000 元，机票未计算在内。",
   "enable_creative": true,
   "enable_validator": true,
+  "effort": "standard",
   "config": {
     "max_iterations": 2,
     "agents": {
@@ -94,6 +95,7 @@
 | `context_summary` | string | 否 | null | 由主控压缩的上下文摘要，帮助 BTCM 理解背景；长度上限 300000 字符（大上下文直传，不压缩） |
 | `enable_creative` | boolean | 否 | true | 是否启用创意生成 Agent；与 `enable_validator` 组合决定运行形态，见下方形态说明 |
 | `enable_validator` | boolean | 否 | true | 是否启用验证 Agent；与 `enable_creative` 组合决定运行形态，见下方形态说明 |
+| `effort` | string | 否 | "standard" | 思考深度三档：`light`（略想，强制单轮 + 快速提示词，本地 Qwen 系模板会关闭思考开关）、`standard`（通用，按配置正常运行）、`deep`（深层，提示词要求充分深思）。非法取值返回 `INVALID_REQUEST` |
 | `config` | object | 否 | null | 覆盖默认配置，见下方配置结构 |
 
 **运行形态**：由 `enable_creative` 与 `enable_validator` 两个开关组合决定，总控类 Agent（controller / meta）恒启用，无开关：
@@ -111,9 +113,9 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `max_iterations` | integer | 最大循环轮数，范围 1~10，默认 2（仅完整循环与长链持续思考形态生效） |
-| `timeout` | integer | 单次调用（含全部循环轮次）超时秒数，范围 1~3600，默认 300 |
-| `agents.creative.num_candidates` | integer | 创意 Agent 每轮生成候选数量，范围 1~10，默认 3 |
+| `max_iterations` | integer | 最大循环轮数，范围 1~10，默认 2（仅完整循环与长链持续思考形态生效；`effort=light` 时强制为 1） |
+| `timeout` | integer | 单次调用（含全部循环轮次）超时秒数，范围 1~3600，默认 3600 |
+| `agents.creative.num_candidates` | integer | 创意 Agent 发散轮候选数上限参考，范围 1~10，默认 3；数量不设硬性要求，不强制凑数 |
 | `agents.<agent>.temperature` | float | 各 Agent 采样温度，范围 0~2；`<agent>` 可为 creative / validator / controller / meta，默认值分别为 0.8 / 0.3 / 0.3 / 0.3 |
 | `agents.<agent>.max_tokens` | integer | 各 Agent 单次请求最大输出 token 数，范围 256~32768；默认 16384（面向本地推理的大输出预算；云端提供商输出上限较低时会拒绝过大的值，按需调低，如 deepseek-chat ≤8192） |
 | `agents.<agent>.timeout` | integer | 各 Agent 单次 LLM 请求超时秒数，范围 1~3600；默认未设置，使用所属提供商的 `timeout` |
@@ -166,7 +168,8 @@
         "issues": ["仍存在轻微问题"]
       },
       "meta_reflection": {
-        "decision": "stop"
+        "decision": "stop",
+        "remaining_iterations": 0
       }
     }
   ]
@@ -241,7 +244,9 @@
 | `timeout` | 达到超时限制 |
 | `single_pass` | 纯形态（纯创意 / 纯验证）单次执行完成 |
 
-**meta 反思的实效**：完整循环中，meta Agent 的 `decision` 参与终止判定（见上表；`verdict=fail` 时 `decision=stop` 无效，循环强制继续，验证判定存在严重问题不得提前定稿）；未终止时其 `next_direction` 作为下轮创意 Agent 的修正方向输入（不重新发散）；`intermediate_log` 各轮的 `meta_reflection` 含 `decision` 与 `next_direction`。响应 `verdict` 恒为验证 Agent 的原判，不因 `controller_stop` 改写。
+**meta 反思的实效**：完整循环中，meta Agent 的 `decision` 参与终止判定（见上表；`verdict=fail` 时 `decision=stop` 无效，循环强制继续，验证判定存在严重问题不得提前定稿）；未终止时其 `next_direction` 作为下轮创意 Agent 的修正方向输入（不重新发散）；`intermediate_log` 各轮的 `meta_reflection` 含 `decision`、`next_direction` 与 `remaining_iterations`（剩余修正轮数，最后一轮为 0）。响应 `verdict` 恒为验证 Agent 的原判，不因 `controller_stop` 改写。
+
+**收束提示**：剩余轮次会注入对应 Agent 的输入——meta 收到剩余轮数与收束提醒（最后一轮明确要求可用即 `stop` 定稿），创意 Agent 在最后一轮收到"直接产出可采纳的最终候选"标记，长链 controller 在最后一轮收到收敛性提示。
 
 #### 2.1.3 错误响应
 
@@ -256,6 +261,47 @@
 | `UNAUTHORIZED` | 受保护端点缺少或错误的管理令牌（HTTP 401） |
 | `PROVIDER_ERROR` | 拉取模型列表时上游提供商请求失败（HTTP 502，仅 `/api/providers/{name}/models`） |
 | `INTERNAL_ERROR` | 服务器内部异常 |
+
+#### 2.1.4 流式调用（SSE）
+
+**端点**：`POST /api/invoke/stream`
+
+**功能**：与 `/api/invoke` 同语义同校验的流式版本，Agent 的思考与输出增量经 Server-Sent Events 前传，供前端实时展示思考过程。请求体与 2.1.1 完全一致（含 `effort`）。
+
+**HTTP 层行为**：
+- 响应 `Content-Type: text/event-stream`，`Cache-Control: no-cache`
+- 流开始前的校验失败（鉴权、纯验证缺 `candidate`、并发限流）直接返回普通 JSON 错误响应（状态码与结构同 `/api/invoke`）
+- 每 15 秒无事件时发送 SSE 注释行心跳（`:` 开头），防止代理/客户端超时断开
+
+**事件序列**：`start` → (`agent_start` / `delta` / `agent_done` / `iteration_done`)* → `done` | `error`
+
+| 事件 | data 字段 | 说明 |
+|------|-----------|------|
+| `start` | `request_id`, `enable_creative`, `enable_validator` | 任务已受理，立即发送 |
+| `agent_start` | `agent`（creative / validator / meta / controller），`iteration` | 某 Agent 开始执行；长链 finalize 的 `iteration` 为 `"finalize"` |
+| `delta` | `agent`, `kind`（`reasoning` 思考过程 / `content` 正式输出），`text` | 模型输出增量；仅无工具调用的请求前传（validator 启用 MCP 联网时该 Agent 保持非流式，无 delta 事件） |
+| `agent_done` | `agent`, `iteration` | 某 Agent 执行结束 |
+| `iteration_done` | `iteration`, `verdict`, `decision` | 完整循环单轮结束（verdict 为验证判定，decision 为 meta 决定） |
+| `done` | 与 `/api/invoke` 响应同构的完整 ApiResponse（`success=true`） | 正常结束，`data` 含 usage 等全部字段 |
+| `error` | 与 `/api/invoke` 错误响应同构的完整 ApiResponse（`success=false`） | 执行失败，`error.code` / `error.message` 可用 |
+
+**示例**：
+
+```
+event: start
+data: {"request_id": "...", "enable_creative": true, "enable_validator": true}
+
+event: agent_start
+data: {"type": "agent_start", "agent": "creative", "iteration": 1}
+
+event: delta
+data: {"type": "delta", "agent": "creative", "kind": "reasoning", "text": "首先..."}
+
+event: done
+data: {"success": true, "data": {...}, "error": null, "request_id": "..."}
+```
+
+客户端断开时服务端掐断仍在执行的调用；调用日志（`/api/logs`）与 `/api/invoke` 一致落盘。
 
 ---
 
@@ -507,12 +553,13 @@
 ## 4. 超时与中断
 
 - 超时分为三层，各司其职：
-  - **全局 `timeout`**（默认 300 秒）：单次调用（含全部循环轮次）的总时长限制。
+  - **全局 `timeout`**（默认 3600 秒）：单次调用（含全部循环轮次）的总时长限制。
   - **Agent 级 `agents.<name>.timeout`**（可选）：该 Agent 单次 LLM 请求超时，设置后覆盖提供商值。
-  - **提供商级 `providers.<name>.timeout`**（默认 300 秒）：该提供商下单次 LLM 请求超时，Agent 级未设置时生效。
+  - **提供商级 `providers.<name>.timeout`**（默认 600 秒）：该提供商下单次 LLM 请求超时，Agent 级未设置时生效。
 - 全局 `timeout` 由服务端强制执行（对整次调用计时，超时即掐断进行中的 LLM 请求）：若已至少完成一轮迭代（有可用的结果——完整循环中为验证判定，长链持续思考中为本轮思考要点），返回成功响应并置 `termination_reason` 为 `timeout`；若一轮都未完成（无可返回的结果），返回错误 `TIMEOUT`。
 - 单次 LLM 请求超时视为该请求失败，触发一次重试，仍失败则该轮降级为 `fail` 判定（与输出解析失败同路径处理）。
 - 使用本地模型时应保证 全局 timeout ≥ 单请求 timeout × 预计请求数，否则调用会在模型完成前被整体掐断。
+- Agent 级与提供商级均支持 `options` 对象（模型私有参数，如 `chat_template_kwargs`），合并优先级为 Agent 级覆盖提供商级，经 OpenAI SDK 的 `extra_body` 合并进请求体顶层透传（可覆盖标准参数；SDK 类型化参数之外的厂商参数必须走此通道）。
 
 ---
 
@@ -524,6 +571,8 @@
 ---
 
 ## 6. 变更记录
+
+- alpha-7（2026-09-04，内部迭代）：新增流式端点 `POST /api/invoke/stream`（SSE：start / agent_start / delta / agent_done / iteration_done / done / error 事件，15 秒心跳，done/error 携带与 `/invoke` 同构的完整响应；调用日志与并发限制同 `/invoke`，客户端断开掐断执行）；新增请求字段 `effort` 三档思考深度（light 略想：强制单轮 + 快速提示词 + 本地 Qwen 系模板关闭思考开关；standard 通用：默认；deep 深层：充分深思提示词）；新增剩余轮次注入（meta 收到剩余修正轮数与收束提醒，创意 Agent 最后一轮收到定稿标记，长链 controller 最后一轮收到收敛提示；`intermediate_log.meta_reflection` 新增 `remaining_iterations`）；创意 Agent 候选数量不再强制凑数（`num_candidates` 降为上限参考）；全局 `timeout` 默认 300 → 3600 秒，提供商 `timeout` 默认 300 → 600 秒（validator Agent 默认 600 秒）；`providers` / `agents` 新增 `options` 对象（模型私有参数透传，Agent 级覆盖提供商级）。
 
 - alpha-6（2026-09-04，内部迭代）：调用日志改为永久留存（JSONL 只追加，移除原 5000 条上限裁剪与文件重写，历史记录不再丢失）；提供商 `timeout` 默认由 120 秒放宽至 300 秒（本地推理服务单次生成常超 120 秒，原默认配"重试一次"会以 240 秒 INTERNAL_ERROR 收场）；四个 Agent `max_tokens` 默认统一为 16384（原 creative / validator 2048、controller / meta 1024；云端提供商输出上限较低时按需调低）。
 - alpha-5（2026-09-02，内部迭代）：`PUT /api/config` 深度合并改为遵循 JSON Merge Patch（RFC 7386）语义——值为 `null` 的键表示删除，修复注册表条目无法删除的缺陷（此前仅在 payload 中省略 `providers.<name>` / `mcp_servers.<name>` 会被旧配置深合并复活，控制面板删除后服务端仍保留）；`providers.<name>.base_url` 新增 scheme 校验（仅 `http` / `https` 且必须含主机名，此前 `ftp://`、缺 scheme 等无效地址被静默接受，直到实际调用才报错）；控制面板新增提供商时前置校验 `base_url`、未保存条目显示「未保存」标记，对未保存提供商点击「拉取模型」改为引导「保存并拉取」，不再直接返回 404「提供商不存在」。
