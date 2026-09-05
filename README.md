@@ -116,3 +116,7 @@ pnpm build      # 产物输出到 btcwebui/build/
 ---
 
 更多接口细节（错误码、配置覆盖规则、超时语义等）见 [share/protocol.md](share/protocol.md)。
+
+## 许可证
+
+[Apache-2.0](LICENSE)

@@ -60,6 +60,7 @@ project-root/
 │   │   └── api/
 │   │       └── client.ts       # API 请求封装
 │   └── build/                 # 构建输出目录（git ignore）
+├── LICENSE                    # Apache-2.0 许可证
 └── README.md
 ```
 
