@@ -17,6 +17,11 @@ export class ApiError extends Error {
   }
 }
 
+// ---------- API 基址 ----------
+// 前后端解耦：前端为独立 SPA。dev 由 vite 代理 /api；独立部署时用
+// VITE_API_BASE 指向后端（如 http://127.0.0.1:8000），后端已开 CORS。
+const API_BASE = import.meta.env.VITE_API_BASE ?? ''
+
 // ---------- 管理令牌（X-Admin-Token） ----------
 
 const ADMIN_TOKEN_KEY = 'btcm_admin_token'
@@ -48,7 +53,7 @@ async function request<T>(
 ): Promise<ApiResponse<T>> {
   let resp: Response
   try {
-    resp = await fetch(`/api${path}`, {
+    resp = await fetch(`${API_BASE}/api${path}`, {
       method,
       headers: {
         'Content-Type': 'application/json',
@@ -137,7 +142,7 @@ export async function invokeStream(
 ): Promise<void> {
   let resp: Response
   try {
-    resp = await fetch('/api/invoke/stream', {
+    resp = await fetch(`${API_BASE}/api/invoke/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

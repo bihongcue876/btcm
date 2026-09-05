@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "postbuild": "node scripts/copy-static.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

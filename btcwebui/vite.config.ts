@@ -4,7 +4,8 @@ import Components from 'unplugin-vue-components/vite'
 import { NaiveUiResolver } from 'unplugin-vue-components/resolvers'
 import { fileURLToPath, URL } from 'node:url'
 
-// dev 时将 /api 代理到后端本体；生产由 FastAPI 同源托管，无需代理
+// dev 时 /api 代理到后端本体；生产独立部署：后端开 CORS，前端经
+// VITE_API_BASE 指向后端（默认同源 /api）。
 export default defineConfig({
   plugins: [
     vue(),
@@ -26,7 +27,8 @@ export default defineConfig({
     },
   },
   build: {
-    // 产物输出到 btcwebui/build/，再由脚本复制到 btcmodule/static/（spec 约定）
+    // 独立构建产物，输出到 btcwebui/build/，由任意静态服务器托管
+    // （前端与后端解耦，不再复制进后端包）
     outDir: 'build',
     // 每次构建清空旧产物：hashed 文件名只在当次有效，累积只会越滚越大
     emptyOutDir: true,

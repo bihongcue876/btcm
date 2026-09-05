@@ -10,7 +10,7 @@ BTCM（Beside-Thinking Chain Module，副思考链模块）是一个可嵌入大
 
 - 任务由调用方决定：集成使用时由宿主 Agent 选择录入的内容（问题、候选、证据、上下文摘要）；人工直接调用时通过请求参数（Agent 启用开关与 `config`）控制使用需求与使用量。
 
-- 自包含与可配置：本体系统与 Web 控制面板一体化部署，单端口同时提供 API 与面板。
+- 自包含与可配置：后端本体独立提供全部 API，可单独运行；前端面板为独立 SPA，与后端解耦（不打包绑定）。
 
 - 范式移用：内部采用“生成-验证-反思”循环结构，该结构可作为思维模块范式，供其他验证或思考模块参照复用。
 
@@ -18,7 +18,7 @@ BTCM（Beside-Thinking Chain Module，副思考链模块）是一个可嵌入大
 
 - **btcmodule**：后端核心模块，基于 Python + FastAPI，提供 REST API 和内部 Agent 逻辑。
 
-- **btcwebui**：前端控制面板，基于 Vue 3 + Vite，提供配置和运行观察界面，构建后由 FastAPI 托管静态文件，实现单端口访问。
+- **btcwebui**：前端控制面板，独立 Vue 3 + Vite SPA，提供配置和运行观察界面，与后端解耦，经 CORS / vite 代理访问本体 API。
 
 ## 2. 目录结构
 
@@ -26,7 +26,7 @@ BTCM（Beside-Thinking Chain Module，副思考链模块）是一个可嵌入大
 project-root/
 ├── btcmodule/                 # 后端核心模块
 │   ├── __init__.py
-│   ├── main.py                # FastAPI 入口，挂载 API 和静态面板
+│   ├── main.py                # FastAPI 入口，挂载 API 路由（不托管前端）
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── task.py            # 任务对象定义
@@ -45,7 +45,6 @@ project-root/
 │   ├── api/
 │   │   ├── __init__.py
 │   │   └── routes.py          # REST API 路由
-│   ├── static/                # 存放 Vue 构建产物（部署时复制到此）
 │   └── btcm.json              # 运行时配置（不受 git 管理，首次启动由内置默认配置生成）
 ├── btcwebui/                  # 前端控制面板
 │   ├── package.json
@@ -92,7 +91,7 @@ project-root/
 
 - **Vue Router**：路由管理
 
-- 包管理使用 pnpm；构建产物经 postbuild 脚本复制到 `btcmodule/static/`
+- 包管理使用 pnpm；构建产物独立输出到 `btcwebui/build/`，与后端解耦，不复制进后端包
 
 ## 4. 后端核心设计
 
@@ -419,7 +418,7 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 
 - 路由：`/` 重定向到 Dashboard，`/config` 配置页，`/logs` 日志页。
 
-- 构建命令：`pnpm build`，输出到 `btcwebui/build/`，postbuild 自动复制到 `btcmodule/static/` 供 FastAPI 托管。
+- 构建命令：`pnpm build`，独立输出到 `btcwebui/build/`；后端不托管前端，生产用 `VITE_API_BASE` 指向后端 API（后端已开 CORS）。
 
 ## 6. 构成与运行
 
@@ -433,11 +432,11 @@ BTCM 的运行形态由请求体中的两个 Agent 启用开关决定：`enable_
 
 - **控制面板（btcwebui）**：本体功能验证无误后开发。
 
-- 构建命令：`pnpm build`，输出到 `btcwebui/build/`，postbuild 自动复制到 `btcmodule/static/` 供 FastAPI 托管（先清空再复制，无陈旧产物）。
+- 构建命令：`pnpm build`，独立输出到 `btcwebui/build/`；开发联调用 `pnpm dev`（vite 代理 `/api` 到 8000）。
 
 - 分包策略：路由级懒加载 + `unplugin-vue-components` 按需引入 naive-ui（不再全量 `use(naive)`），`manualChunks` 仅固定 vue/vue-router，已用组件由 rollup 自动聚合为共享 chunk。
 
-  - 面板就绪后，访问 `http://localhost:8000` 即可同时获得 API 和控制面板，再进行联调。
+  - 面板就绪后，`pnpm dev` 访问 `http://localhost:5173` 联调（dev 代理 `/api` 至 8000）；生产由独立静态服务器托管 `build/` 产物，经 `VITE_API_BASE` 指向后端。
 
 ### 6.1 依赖管理
 

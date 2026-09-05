@@ -572,6 +572,8 @@ data: {"success": true, "data": {...}, "error": null, "request_id": "..."}
 
 ## 6. 变更记录
 
+- alpha-9（2026-09-05，内部迭代）：前端与后端解耦——后端不再托管静态面板，转为纯 API 服务（移除 `static/` 目录与单端口托管，未匹配路径一律返回统一 envelope）；新增 CORS 支持（默认允许任意来源，由 `X-Admin-Token` 鉴权保护；可经环境变量 `BTCM_CORS_ORIGINS` 逗号分隔收紧白名单），前端独立 SPA 经 vite 代理 / `VITE_API_BASE` 访问 API。`create_app()` 移除 `static_dir` 参数（原静态面板测试用例随之删除）。
+
 - alpha-8（2026-09-04，内部迭代）：数值参数放开上限（仅保留下限，用户自定义）——请求体与全局配置的 `timeout`（≥1 秒）、`max_tokens`（≥256）、`num_candidates`（≥1）、提供商/MCP `timeout`（≥1 秒）不再设上限；`max_iterations` 统一限 1~50；`temperature` 保留 0~2（OpenAI 兼容 API 通行约定，超过会被提供商拒绝）。请求体文本字段设防滥用上限（`user_query` / `candidate` / `context_summary` 至多 50000 字符，`evidence` 至多 32 条且总字符数至多 200000，`request_id` 至多 64 字符）。`structured_output` 收敛为枚举 `text` / `json_object`。`admin_token` 仅允许 ASCII / latin-1 字符（需经 X-Admin-Token 头传递）。新增 `duckduckgo` 检索预设（本地 MCP 子进程，后端自动拉起、随配置启停）。前端思考面板修复单块内容超长时被 flex 压缩掩盖且无法滚动的问题。
 
 - alpha-7（2026-09-04，内部迭代）：新增流式端点 `POST /api/invoke/stream`（SSE：start / agent_start / delta / agent_done / iteration_done / done / error 事件，15 秒心跳，done/error 携带与 `/invoke` 同构的完整响应；调用日志与并发限制同 `/invoke`，客户端断开掐断执行）；新增请求字段 `effort` 三档思考深度（light 略想：强制单轮 + 快速提示词 + 本地 Qwen 系模板关闭思考开关；standard 通用：默认；deep 深层：充分深思提示词）；新增剩余轮次注入（meta 收到剩余修正轮数与收束提醒，创意 Agent 最后一轮收到定稿标记，长链 controller 最后一轮收到收敛提示；`intermediate_log.meta_reflection` 新增 `remaining_iterations`）；创意 Agent 候选数量不再强制凑数（`num_candidates` 降为上限参考）；全局 `timeout` 默认 300 → 3600 秒，提供商 `timeout` 默认 300 → 600 秒（validator Agent 默认 600 秒）；`providers` / `agents` 新增 `options` 对象（模型私有参数透传，Agent 级覆盖提供商级）。

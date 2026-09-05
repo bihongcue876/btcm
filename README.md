@@ -1,6 +1,6 @@
 # BTCM（Beside-Thinking Chain Module，副思考链模块）
 
-可嵌入大型集成 Agent 的辅助思考器官：接收思考任务，内部由创意生成、验证、长链总控（controller）与检查管理（meta）四个 Agent 经“生成-验证-反思”循环处理后返回结构化结果。meta 承担元认知式的全局思维管理（可提前收敛终止），验证 Agent 可按需接入 MCP 联网工具。服务无状态，自带 Web 控制面板，单端口运行。
+可嵌入大型集成 Agent 的辅助思考器官：接收思考任务，内部由创意生成、验证、长链总控（controller）与检查管理（meta）四个 Agent 经“生成-验证-反思”循环处理后返回结构化结果。meta 承担元认知式的全局思维管理（可提前收敛终止），验证 Agent 可按需接入 MCP 联网工具。后端为无状态 API 服务，前端为独立 SPA（与后端解耦，不打包绑定）。
 
 - 总体设计：[share/spec.md](share/spec.md)
 - Agent 设计：[docs/Agents.md](docs/Agents.md)
@@ -92,6 +92,8 @@ uv run python -m unittest discover -s ../tests -t ..
 
 ### 5. 控制面板（btcwebui）
 
+前端为独立 SPA，与后端解耦：开发用 vite dev server（代理 `/api` 到后端），生产独立托管 `build/` 产物、经 `VITE_API_BASE` 指向后端（后端已开 CORS）。
+
 开发模式（前端 dev 服务将 `/api` 代理到 `localhost:8000`）：
 
 ```bash
@@ -100,13 +102,13 @@ pnpm install
 pnpm dev        # 访问 http://localhost:5173
 ```
 
-生产模式（构建产物复制到 `btcmodule/static/`，由后端单端口托管）：
+生产模式（构建产物独立输出到 `btcwebui/build/`，由任意静态服务器托管）：
 
 ```bash
 cd btcwebui
 pnpm install
-pnpm build      # 产物自动复制到 btcmodule/static/
-# 重启后端后访问 http://localhost:8000 即可同时获得 API 与控制面板
+pnpm build      # 产物输出到 btcwebui/build/
+# 静态托管 build/ 产物；构建时用 VITE_API_BASE 指向后端 API（默认同源 /api）
 ```
 
 面板提供三页：**运行**（发起调用并观察中间过程）、**配置**（可视化编辑运行参数、模型路由、MCP 服务器注册表与管理令牌，密钥类输入不回显）、**日志**（历史调用记录分页查看，含 token 计量）。

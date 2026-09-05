@@ -1,18 +1,20 @@
-"""BTCM 后端入口：FastAPI 应用，挂载 API 路由与静态面板。
+"""BTCM 后端入口：FastAPI 应用，仅挂载 API 路由（不托管前端面板）。
 
 运行（在 btcmodule 目录下）：
     uv run python -m uvicorn main:app --port 8000
 或（任意位置）：
     uv run --project btcmodule python -m uvicorn btcmodule.main:app --port 8000
 
-采用绝对导入，使 main 既可作为包模块（btcmodule.main）也可作为
-顶层入口（main）被 uvicorn 加载。
+前端为独立 Vue SPA（btcwebui），经 CORS 或同源反代访问本 API，
+不与后端打包绑定。采用绝对导入，使 main 既可作为包模块
+（btcmodule.main）也可作为顶层入口（main）被 uvicorn 加载。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import socket
 import subprocess
 import sys
@@ -24,8 +26,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from btcmodule.api.routes import router
@@ -34,8 +36,6 @@ from btcmodule.core.llm import ModelGateway
 from btcmodule.core.logger import CallLogger
 from btcmodule.core.loop import Engine
 from btcmodule.core.result import ErrorInfo, fail
-
-STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 logger = logging.getLogger("btcmodule.main")
 
@@ -182,7 +182,6 @@ async def _lifespan(cm: ConfigManager):
 def create_app(
     config_path: str | Path | None = None,
     log_path: str | Path | None = None,
-    static_dir: str | Path | None = None,
 ) -> FastAPI:
     # 结构化运行日志：根 logger 无 handler（直跑 uvicorn 等）时补基础配置；
     # 已有 handler（如测试或外部装配）则不动
@@ -194,7 +193,6 @@ def create_app(
     # 生产环境抬升 httpx/httpcore 日志级别，避免请求 URL（含 MCP 密钥）泄漏
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    static_dir = Path(static_dir) if static_dir else STATIC_DIR
     cm = ConfigManager(path=config_path) if config_path else ConfigManager()
     gateway = ModelGateway(cm)
     engine = Engine(cm, gateway)
@@ -212,6 +210,21 @@ def create_app(
     app.state.logger = logger
 
     app.include_router(router)
+
+    # 前后端解耦：前端为独立 Vue SPA，经 CORS 跨源访问 API。
+    # 默认允许任意来源（内部工具，由 X-Admin-Token 鉴权保护）；
+    # 需要收紧时用 BTCM_CORS_ORIGINS 逗号分隔指定白名单。
+    cors_origins = (
+        os.environ.get("BTCM_CORS_ORIGINS", "*").split(",")
+        if os.environ.get("BTCM_CORS_ORIGINS")
+        else ["*"]
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(
@@ -250,17 +263,11 @@ def create_app(
     async def http_exception_handler(
         request: Request, exc: StarletteHTTPException
     ) -> Response:
-        """统一 HTTP 异常响应（含未匹配 404）。
+        """统一 HTTP 异常响应（含未匹配 404），返回统一外层结构。
 
-        - Vue history 路由的深链接（如 /config、/logs）：无同名文件且无扩展名时
-          回退控制面板 index.html，由前端路由接管（spec 单端口托管约定）
-        - 其余 HTTP 异常（含 /api 下的 404）返回统一外层结构
+        后端只承载 API，不托管前端；前端 SPA 由独立部署的静态服务器
+        负责 history 路由回退，此处对一切未匹配路径统一返回 envelope。
         """
-        path = request.url.path
-        if exc.status_code == 404 and not path.startswith("/api"):
-            index = static_dir / "index.html"
-            if index.is_file() and "." not in Path(path).name:
-                return FileResponse(index)
         rid = str(uuid.uuid4())
         resp = fail(
             ErrorInfo(
@@ -270,12 +277,6 @@ def create_app(
             rid,
         )
         return JSONResponse(status_code=exc.status_code, content=resp.model_dump())
-
-    # 阶段二构建产物存在时，由本体在同一端口托管控制面板
-    if (static_dir / "index.html").exists():
-        app.mount(
-            "/", StaticFiles(directory=static_dir, html=True), name="static"
-        )
 
     return app
 
